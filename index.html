@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Football Auction</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Teko:wght@400;500;600;700&family=Work+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  :root {
+    --pitch: #0f2e1d;
+    --pitch-deep: #0a2116;
+    --panel: #163c27;
+    --panel-line: #24513a;
+    --chalk: #f3f1e7;
+    --gold: #c8992b;
+    --bid: #c4432b;
+    --bid-alert: #ff7a5c; /* accessible red for text on dark panels — plain --bid text failed WCAG contrast at 2.45:1 */
+    --muted: #9fb8a8;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--pitch);
+    color: var(--chalk);
+    font-family: 'Work Sans', sans-serif;
+    min-height: 100%;
+    background-image:
+      repeating-linear-gradient(0deg, rgba(255,255,255,0.02) 0px, rgba(255,255,255,0.02) 1px, transparent 1px, transparent 64px),
+      repeating-linear-gradient(90deg, rgba(255,255,255,0.02) 0px, rgba(255,255,255,0.02) 1px, transparent 1px, transparent 64px);
+  }
+  .display { font-family: 'Teko', sans-serif; letter-spacing: 0.01em; }
+  ::-webkit-scrollbar { height: 8px; width: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--panel-line); border-radius: 4px; }
+  :is(button, input, select, a, [tabindex]):focus-visible {
+    outline: 3px solid var(--gold);
+    outline-offset: 2px;
+  }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+// ---------- Sample data (placeholder — will move to a real player DB later) ----------
+const PLAYER_POOL = [
+  { id: 1, name: "Kylian Mbappé", pos: "ST", club: "Real Madrid", nation: "France", rating: 91 },
+  { id: 2, name: "Erling Haaland", pos: "ST", club: "Manchester City", nation: "Norway", rating: 91 },
+  { id: 3, name: "Vinícius Júnior", pos: "LW", club: "Real Madrid", nation: "Brazil", rating: 90 },
+  { id: 4, name: "Jude Bellingham", pos: "CM", club: "Real Madrid", nation: "England", rating: 90 },
+  { id: 5, name: "Mohamed Salah", pos: "RW", club: "Liverpool", nation: "Egypt", rating: 89 },
+  { id: 6, name: "Kevin De Bruyne", pos: "CM", club: "Napoli", nation: "Belgium", rating: 88 },
+  { id: 7, name: "Virgil van Dijk", pos: "CB", club: "Liverpool", nation: "Netherlands", rating: 89 },
+  { id: 8, name: "Alisson Becker", pos: "GK", club: "Liverpool", nation: "Brazil", rating: 88 },
+  { id: 9, name: "Bukayo Saka", pos: "RW", club: "Arsenal", nation: "England", rating: 87 },
+  { id: 10, name: "Rodri", pos: "CDM", club: "Manchester City", nation: "Spain", rating: 89 },
+  { id: 11, name: "Thibaut Courtois", pos: "GK", club: "Real Madrid", nation: "Belgium", rating: 89 },
+  { id: 12, name: "Ederson", pos: "GK", club: "Manchester City", nation: "Brazil", rating: 88 },
+  { id: 13, name: "Gianluigi Donnarumma", pos: "GK", club: "Paris Saint-Germain", nation: "Italy", rating: 88 },
+  { id: 14, name: "Jan Oblak", pos: "GK", club: "Atlético Madrid", nation: "Slovenia", rating: 87 },
+  { id: 15, name: "Mike Maignan", pos: "GK", club: "AC Milan", nation: "France", rating: 87 },
+  { id: 16, name: "Emiliano Martínez", pos: "GK", club: "Aston Villa", nation: "Argentina", rating: 87 },
+  { id: 17, name: "Marc-André ter Stegen", pos: "GK", club: "Barcelona", nation: "Germany", rating: 86 },
+  { id: 18, name: "David Raya", pos: "GK", club: "Arsenal", nation: "Spain", rating: 85 },
+  { id: 19, name: "Gregor Kobel", pos: "GK", club: "Borussia Dortmund", nation: "Switzerland", rating: 85 },
+  { id: 20, name: "Yann Sommer", pos: "GK", club: "Inter", nation: "Switzerland", rating: 84 },
+  { id: 21, name: "Unai Simón", pos: "GK", club: "Athletic Club", nation: "Spain", rating: 84 },
+  { id: 22, name: "Diogo Costa", pos: "GK", club: "Porto", nation: "Portugal", rating: 83 },
+  { id: 23, name: "Nick Pope", pos: "GK", club: "Newcastle United", nation: "England", rating: 82 },
+  { id: 24, name: "Bart Verbruggen", pos: "GK", club: "Brighton", nation: "Netherlands", rating: 78 },
+  { id: 25, name: "William Saliba", pos: "CB", club: "Arsenal", nation: "France", rating: 87 },
+  { id: 26, name: "Rúben Dias", pos: "CB", club: "Manchester City", nation: "Portugal", rating: 87 },
+  { id: 27, name: "Antonio Rüdiger", pos: "CB", club: "Real Madrid", nation: "Germany", rating: 86 },
+  { id: 28, name: "Gabriel Magalhães", pos: "CB", club: "Arsenal", nation: "Brazil", rating: 86 },
+  { id: 29, name: "Marquinhos", pos: "CB", club: "Paris Saint-Germain", nation: "Brazil", rating: 86 },
+  { id: 30, name: "Alessandro Bastoni", pos: "CB", club: "Inter", nation: "Italy", rating: 86 },
+  { id: 31, name: "Ibrahima Konaté", pos: "CB", club: "Liverpool", nation: "France", rating: 85 },
+  { id: 32, name: "Ronald Araújo", pos: "CB", club: "Barcelona", nation: "Uruguay", rating: 85 },
+  { id: 33, name: "Joško Gvardiol", pos: "CB", club: "Manchester City", nation: "Croatia", rating: 85 },
+  { id: 34, name: "Cristian Romero", pos: "CB", club: "Tottenham", nation: "Argentina", rating: 85 },
+  { id: 35, name: "Éder Militão", pos: "CB", club: "Real Madrid", nation: "Brazil", rating: 84 },
+  { id: 36, name: "Dayot Upamecano", pos: "CB", club: "Bayern Munich", nation: "France", rating: 84 },
+  { id: 37, name: "Kim Min-jae", pos: "CB", club: "Bayern Munich", nation: "South Korea", rating: 84 },
+  { id: 38, name: "Gleison Bremer", pos: "CB", club: "Juventus", nation: "Brazil", rating: 84 },
+  { id: 39, name: "Lisandro Martínez", pos: "CB", club: "Manchester United", nation: "Argentina", rating: 84 },
+  { id: 40, name: "Nico Schlotterbeck", pos: "CB", club: "Borussia Dortmund", nation: "Germany", rating: 83 },
+  { id: 41, name: "Micky van de Ven", pos: "CB", club: "Tottenham", nation: "Netherlands", rating: 83 },
+  { id: 42, name: "Jonathan Tah", pos: "CB", club: "Bayer Leverkusen", nation: "Germany", rating: 82 },
+  { id: 43, name: "Pau Cubarsí", pos: "CB", club: "Barcelona", nation: "Spain", rating: 82 },
+  { id: 44, name: "Edmond Tapsoba", pos: "CB", club: "Bayer Leverkusen", nation: "Burkina Faso", rating: 81 },
+  { id: 45, name: "Levi Colwill", pos: "CB", club: "Chelsea", nation: "England", rating: 81 },
+  { id: 46, name: "Marc Guéhi", pos: "CB", club: "Crystal Palace", nation: "England", rating: 81 },
+  { id: 47, name: "Sven Botman", pos: "CB", club: "Newcastle United", nation: "Netherlands", rating: 81 },
+  { id: 48, name: "Leny Yoro", pos: "CB", club: "Manchester United", nation: "France", rating: 80 },
+  { id: 49, name: "Alphonso Davies", pos: "LB", club: "Bayern Munich", nation: "Canada", rating: 84 },
+  { id: 50, name: "Theo Hernández", pos: "LB", club: "AC Milan", nation: "France", rating: 85 },
+  { id: 51, name: "Nuno Mendes", pos: "LB", club: "Paris Saint-Germain", nation: "Portugal", rating: 84 },
+  { id: 52, name: "Andrew Robertson", pos: "LB", club: "Liverpool", nation: "Scotland", rating: 84 },
+  { id: 53, name: "Alejandro Grimaldo", pos: "LB", club: "Bayer Leverkusen", nation: "Spain", rating: 84 },
+  { id: 54, name: "Federico Dimarco", pos: "LB", club: "Inter", nation: "Italy", rating: 84 },
+  { id: 55, name: "Ferland Mendy", pos: "LB", club: "Real Madrid", nation: "France", rating: 82 },
+  { id: 56, name: "Raphaël Guerreiro", pos: "LB", club: "Bayern Munich", nation: "Portugal", rating: 81 },
+  { id: 57, name: "Marc Cucurella", pos: "LB", club: "Chelsea", nation: "Spain", rating: 81 },
+  { id: 58, name: "Luke Shaw", pos: "LB", club: "Manchester United", nation: "England", rating: 81 },
+  { id: 59, name: "Pervis Estupiñán", pos: "LB", club: "Brighton", nation: "Ecuador", rating: 80 },
+  { id: 60, name: "David Raum", pos: "LB", club: "RB Leipzig", nation: "Germany", rating: 80 },
+  { id: 61, name: "Destiny Udogie", pos: "LB", club: "Tottenham", nation: "Italy", rating: 79 },
+  { id: 62, name: "Rayan Aït-Nouri", pos: "LB", club: "Wolverhampton", nation: "Algeria", rating: 79 },
+  { id: 63, name: "Miguel Gutiérrez", pos: "LB", club: "Girona", nation: "Spain", rating: 73 },
+  { id: 64, name: "Trent Alexander-Arnold", pos: "RB", club: "Real Madrid", nation: "England", rating: 86 },
+  { id: 65, name: "Achraf Hakimi", pos: "RB", club: "Paris Saint-Germain", nation: "Morocco", rating: 86 },
+  { id: 66, name: "Dani Carvajal", pos: "RB", club: "Real Madrid", nation: "Spain", rating: 85 },
+  { id: 67, name: "Jules Koundé", pos: "RB", club: "Barcelona", nation: "France", rating: 85 },
+  { id: 68, name: "Jeremie Frimpong", pos: "RB", club: "Liverpool", nation: "Netherlands", rating: 84 },
+  { id: 69, name: "Reece James", pos: "RB", club: "Chelsea", nation: "England", rating: 83 },
+  { id: 70, name: "Denzel Dumfries", pos: "RB", club: "Inter", nation: "Netherlands", rating: 82 },
+  { id: 71, name: "Ben White", pos: "RB", club: "Arsenal", nation: "England", rating: 82 },
+  { id: 72, name: "Pedro Porro", pos: "RB", club: "Tottenham", nation: "Spain", rating: 82 },
+  { id: 73, name: "Giovanni Di Lorenzo", pos: "RB", club: "Napoli", nation: "Italy", rating: 82 },
+  { id: 74, name: "Kyle Walker", pos: "RB", club: "AC Milan", nation: "England", rating: 81 },
+  { id: 75, name: "Diogo Dalot", pos: "RB", club: "Manchester United", nation: "Portugal", rating: 81 },
+  { id: 76, name: "Kieran Trippier", pos: "RB", club: "Newcastle United", nation: "England", rating: 80 },
+  { id: 77, name: "Noussair Mazraoui", pos: "RB", club: "Manchester United", nation: "Morocco", rating: 80 },
+  { id: 78, name: "Yan Couto", pos: "RB", club: "Borussia Dortmund", nation: "Brazil", rating: 72 },
+  { id: 79, name: "Declan Rice", pos: "CDM", club: "Arsenal", nation: "England", rating: 87 },
+  { id: 80, name: "Joshua Kimmich", pos: "CDM", club: "Bayern Munich", nation: "Germany", rating: 86 },
+  { id: 81, name: "Aurélien Tchouaméni", pos: "CDM", club: "Real Madrid", nation: "France", rating: 85 },
+  { id: 82, name: "Bruno Guimarães", pos: "CDM", club: "Newcastle United", nation: "Brazil", rating: 85 },
+  { id: 83, name: "Hakan Çalhanoğlu", pos: "CDM", club: "Inter", nation: "Turkey", rating: 85 },
+  { id: 84, name: "Moisés Caicedo", pos: "CDM", club: "Chelsea", nation: "Ecuador", rating: 84 },
+  { id: 85, name: "Martín Zubimendi", pos: "CDM", club: "Arsenal", nation: "Spain", rating: 84 },
+  { id: 86, name: "Casemiro", pos: "CDM", club: "Manchester United", nation: "Brazil", rating: 84 },
+  { id: 87, name: "João Palhinha", pos: "CDM", club: "Bayern Munich", nation: "Portugal", rating: 83 },
+  { id: 88, name: "Sandro Tonali", pos: "CDM", club: "Newcastle United", nation: "Italy", rating: 83 },
+  { id: 89, name: "Granit Xhaka", pos: "CDM", club: "Bayer Leverkusen", nation: "Switzerland", rating: 83 },
+  { id: 90, name: "Eduardo Camavinga", pos: "CDM", club: "Real Madrid", nation: "France", rating: 83 },
+  { id: 91, name: "N'Golo Kanté", pos: "CDM", club: "Al-Ittihad", nation: "France", rating: 83 },
+  { id: 92, name: "Manuel Locatelli", pos: "CDM", club: "Juventus", nation: "Italy", rating: 82 },
+  { id: 93, name: "Federico Valverde", pos: "CM", club: "Real Madrid", nation: "Uruguay", rating: 88 },
+  { id: 94, name: "Pedri", pos: "CM", club: "Barcelona", nation: "Spain", rating: 87 },
+  { id: 95, name: "Bernardo Silva", pos: "CM", club: "Manchester City", nation: "Portugal", rating: 87 },
+  { id: 96, name: "Frenkie de Jong", pos: "CM", club: "Barcelona", nation: "Netherlands", rating: 86 },
+  { id: 97, name: "Nicolò Barella", pos: "CM", club: "Inter", nation: "Italy", rating: 86 },
+  { id: 98, name: "Alexis Mac Allister", pos: "CM", club: "Liverpool", nation: "Argentina", rating: 85 },
+  { id: 99, name: "Vitinha", pos: "CM", club: "Paris Saint-Germain", nation: "Portugal", rating: 85 },
+  { id: 100, name: "Dominik Szoboszlai", pos: "CM", club: "Liverpool", nation: "Hungary", rating: 84 },
+  { id: 101, name: "Enzo Fernández", pos: "CM", club: "Chelsea", nation: "Argentina", rating: 84 },
+  { id: 102, name: "Rodrigo De Paul", pos: "CM", club: "Atlético Madrid", nation: "Argentina", rating: 83 },
+  { id: 103, name: "Gavi", pos: "CM", club: "Barcelona", nation: "Spain", rating: 83 },
+  { id: 104, name: "João Neves", pos: "CM", club: "Paris Saint-Germain", nation: "Portugal", rating: 82 },
+  { id: 105, name: "Ryan Gravenberch", pos: "CM", club: "Liverpool", nation: "Netherlands", rating: 82 },
+  { id: 106, name: "Tijjani Reijnders", pos: "CM", club: "AC Milan", nation: "Netherlands", rating: 82 },
+  { id: 107, name: "Scott McTominay", pos: "CM", club: "Napoli", nation: "Scotland", rating: 82 },
+  { id: 108, name: "Mateo Kovačić", pos: "CM", club: "Manchester City", nation: "Croatia", rating: 82 },
+  { id: 109, name: "Kobbie Mainoo", pos: "CM", club: "Manchester United", nation: "England", rating: 80 },
+  { id: 110, name: "Warren Zaïre-Emery", pos: "CM", club: "Paris Saint-Germain", nation: "France", rating: 80 },
+  { id: 111, name: "Jamal Musiala", pos: "CAM", club: "Bayern Munich", nation: "Germany", rating: 88 },
+  { id: 112, name: "Florian Wirtz", pos: "CAM", club: "Liverpool", nation: "Germany", rating: 88 },
+  { id: 113, name: "Phil Foden", pos: "CAM", club: "Manchester City", nation: "England", rating: 88 },
+  { id: 114, name: "Martin Ødegaard", pos: "CAM", club: "Arsenal", nation: "Norway", rating: 87 },
+  { id: 115, name: "Bruno Fernandes", pos: "CAM", club: "Manchester United", nation: "Portugal", rating: 87 },
+  { id: 116, name: "Cole Palmer", pos: "CAM", club: "Chelsea", nation: "England", rating: 87 },
+  { id: 117, name: "Paulo Dybala", pos: "CAM", club: "Roma", nation: "Argentina", rating: 86 },
+  { id: 118, name: "Dani Olmo", pos: "CAM", club: "Barcelona", nation: "Spain", rating: 84 },
+  { id: 119, name: "Kai Havertz", pos: "CAM", club: "Arsenal", nation: "Germany", rating: 84 },
+  { id: 120, name: "James Maddison", pos: "CAM", club: "Tottenham", nation: "England", rating: 83 },
+  { id: 121, name: "Christopher Nkunku", pos: "CAM", club: "Chelsea", nation: "France", rating: 83 },
+  { id: 122, name: "Xavi Simons", pos: "CAM", club: "RB Leipzig", nation: "Netherlands", rating: 82 },
+  { id: 123, name: "Julian Brandt", pos: "CAM", club: "Borussia Dortmund", nation: "Germany", rating: 81 },
+  { id: 124, name: "Mason Mount", pos: "CAM", club: "Manchester United", nation: "England", rating: 77 },
+  { id: 125, name: "Giovani Lo Celso", pos: "CAM", club: "Real Betis", nation: "Argentina", rating: 74 },
+  { id: 126, name: "Heung-min Son", pos: "LW", club: "Tottenham", nation: "South Korea", rating: 87 },
+  { id: 127, name: "Rafael Leão", pos: "LW", club: "AC Milan", nation: "Portugal", rating: 86 },
+  { id: 128, name: "Khvicha Kvaratskhelia", pos: "LW", club: "Paris Saint-Germain", nation: "Georgia", rating: 86 },
+  { id: 129, name: "Luis Díaz", pos: "LW", club: "Liverpool", nation: "Colombia", rating: 85 },
+  { id: 130, name: "Nico Williams", pos: "LW", club: "Athletic Club", nation: "Spain", rating: 84 },
+  { id: 131, name: "Gabriel Martinelli", pos: "LW", club: "Arsenal", nation: "Brazil", rating: 84 },
+  { id: 132, name: "Cody Gakpo", pos: "LW", club: "Liverpool", nation: "Netherlands", rating: 84 },
+  { id: 133, name: "Leroy Sané", pos: "LW", club: "Bayern Munich", nation: "Germany", rating: 84 },
+  { id: 134, name: "Kaoru Mitoma", pos: "LW", club: "Brighton", nation: "Japan", rating: 82 },
+  { id: 135, name: "Lamine Yamal", pos: "RW", club: "Barcelona", nation: "Spain", rating: 89 },
+  { id: 136, name: "Rodrygo", pos: "RW", club: "Real Madrid", nation: "Brazil", rating: 86 },
+  { id: 137, name: "Ousmane Dembélé", pos: "RW", club: "Paris Saint-Germain", nation: "France", rating: 86 },
+  { id: 138, name: "Raphinha", pos: "RW", club: "Barcelona", nation: "Brazil", rating: 85 },
+  { id: 139, name: "Michael Olise", pos: "RW", club: "Bayern Munich", nation: "France", rating: 84 },
+  { id: 140, name: "Dejan Kulusevski", pos: "RW", club: "Tottenham", nation: "Sweden", rating: 83 },
+  { id: 141, name: "Takefusa Kubo", pos: "RW", club: "Real Sociedad", nation: "Japan", rating: 82 },
+  { id: 142, name: "Federico Chiesa", pos: "RW", club: "Liverpool", nation: "Italy", rating: 81 },
+  { id: 143, name: "Harry Kane", pos: "ST", club: "Bayern Munich", nation: "England", rating: 90 },
+  { id: 144, name: "Lautaro Martínez", pos: "ST", club: "Inter", nation: "Argentina", rating: 89 },
+  { id: 145, name: "Robert Lewandowski", pos: "ST", club: "Barcelona", nation: "Poland", rating: 88 },
+  { id: 146, name: "Victor Osimhen", pos: "ST", club: "Galatasaray", nation: "Nigeria", rating: 88 },
+  { id: 147, name: "Alexander Isak", pos: "ST", club: "Liverpool", nation: "Sweden", rating: 87 },
+  { id: 148, name: "Viktor Gyökeres", pos: "ST", club: "Arsenal", nation: "Sweden", rating: 86 },
+  { id: 149, name: "Antoine Griezmann", pos: "ST", club: "Atlético Madrid", nation: "France", rating: 86 },
+  { id: 150, name: "Julián Álvarez", pos: "ST", club: "Atlético Madrid", nation: "Argentina", rating: 85 },
+  { id: 151, name: "Ollie Watkins", pos: "ST", club: "Aston Villa", nation: "England", rating: 84 },
+  { id: 152, name: "Serhou Guirassy", pos: "ST", club: "Borussia Dortmund", nation: "Guinea", rating: 84 },
+  { id: 153, name: "Darwin Núñez", pos: "ST", club: "Liverpool", nation: "Uruguay", rating: 82 },
+  { id: 154, name: "Dušan Vlahović", pos: "ST", club: "Juventus", nation: "Serbia", rating: 82 },
+  { id: 155, name: "Rasmus Højlund", pos: "ST", club: "Manchester United", nation: "Denmark", rating: 79 },
+];
+
+// Managers now join themselves by typing a name in the top bar — no fixed roster.
+const MANAGER_COLORS = ["#c8992b", "#6fb1a0", "#c4432b", "#5f9fd6", "#c98fd6", "#5fb7a0", "#d68f5f", "#8fa8d6"];
+const MAX_MANAGERS = 10;
+const MAX_NAME_LENGTH = 24;
+
+function makeManagerId() {
+  return `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+const START_BUDGET = 100; // Cr
+const SQUAD_SIZE = 11;
+const BID_STEP = 1;
+const TIMER_SECONDS = 15;
+const INITIAL_DEFAULT_BASE = 10; // Cr — auctioneer can change this at setup and any time after
+
+function crFmt(n) {
+  return `₹${n.toLocaleString("en-IN")} Cr`;
+}
+
+// ---------- Root ----------
+function App() {
+  const [viewAs, setViewAs] = useState("auctioneer"); // "auctioneer" | manager id
+  const [pool, setPool] = useState(PLAYER_POOL);
+  const [defaultBasePrice, setDefaultBasePriceState] = useState(INITIAL_DEFAULT_BASE);
+  const [current, setCurrent] = useState(null); // { player, base, bid, bidder, status: 'idle'|'live'|'sold'|'unsold' }
+  const [timeLeft, setTimeLeft] = useState(TIMER_SECONDS);
+  const [running, setRunning] = useState(false);
+  const [managers, setManagers] = useState([]); // { id, name, color }
+  const [budgets, setBudgets] = useState({});
+  const [squads, setSquads] = useState({});
+  const [bidHistory, setBidHistory] = useState([]);
+  const [log, setLog] = useState(["Room created. Waiting for auctioneer to select a player."]);
+  const timerRef = useRef(null);
+
+  useEffect(() => {
+    if (running && timeLeft > 0) {
+      timerRef.current = setTimeout(() => setTimeLeft(t => t - 1), 1000);
+    } else if (running && timeLeft === 0) {
+      finishAuction();
+    }
+    return () => clearTimeout(timerRef.current);
+  }, [running, timeLeft]);
+
+  function addLog(msg) {
+    setLog(l => [msg, ...l].slice(0, 30));
+  }
+
+  function addManager(rawName) {
+    const name = (rawName || "").trim().slice(0, MAX_NAME_LENGTH);
+    if (!name) {
+      addLog("Enter a name to join as a manager.");
+      return null;
+    }
+    if (managers.length >= MAX_MANAGERS) {
+      addLog(`The manager list is full (max ${MAX_MANAGERS}).`);
+      return null;
+    }
+    if (managers.some(m => m.name.toLowerCase() === name.toLowerCase())) {
+      addLog(`"${name}" is already in the auction — try a different name.`);
+      return null;
+    }
+    const id = makeManagerId();
+    const color = MANAGER_COLORS[managers.length % MANAGER_COLORS.length];
+    setManagers(list => [...list, { id, name, color }]);
+    setBudgets(b => ({ ...b, [id]: START_BUDGET }));
+    setSquads(s => ({ ...s, [id]: [] }));
+    addLog(`${name} joined the auction.`);
+    return id;
+  }
+
+  function removeManager(id) {
+    const m = managers.find(mm => mm.id === id);
+    if (!m) return;
+    if (squads[id] && squads[id].length > 0) {
+      addLog(`Can't remove ${m.name} — they already own players.`);
+      return;
+    }
+    if (current && current.bidder === id) {
+      addLog(`Can't remove ${m.name} — they're the current highest bidder.`);
+      return;
+    }
+    setManagers(list => list.filter(mm => mm.id !== id));
+    setBudgets(b => {
+      const rest = { ...b };
+      delete rest[id];
+      return rest;
+    });
+    setSquads(s => {
+      const rest = { ...s };
+      delete rest[id];
+      return rest;
+    });
+    if (viewAs === id) setViewAs("auctioneer");
+    addLog(`${m.name} left the auction.`);
+  }
+
+  function selectPlayer(player) {
+    if (running) return;
+    setCurrent({ player, base: defaultBasePrice, bid: defaultBasePrice, bidder: null, status: "idle" });
+    setTimeLeft(TIMER_SECONDS);
+    setBidHistory([]);
+    addLog(`Auctioneer selected ${player.name}. Base price set to ${crFmt(defaultBasePrice)} (default — adjustable before the auction starts).`);
+  }
+
+  function setDefaultBasePrice(amount) {
+    const n = Number(amount);
+    if (!Number.isFinite(n) || n <= 0) {
+      addLog("Enter a default base price greater than 0.");
+      return;
+    }
+    setDefaultBasePriceState(n);
+    addLog(`Default base price set to ${crFmt(n)}. Applies to players selected from now on.`);
+  }
+
+  function updateBasePrice(amount) {
+    if (!current || current.status !== "idle") return; // only editable before the auction goes live
+    const n = Number(amount);
+    if (!Number.isFinite(n) || n <= 0) {
+      addLog("Enter a base price greater than 0.");
+      return;
+    }
+    setCurrent(c => ({ ...c, base: n, bid: n }));
+    addLog(`Base price for ${current.player.name} overridden to ${crFmt(n)}.`);
+  }
+
+  function startAuction() {
+    if (!current) return;
+    if (managers.length === 0) {
+      addLog("Add at least one manager before starting the auction.");
+      return;
+    }
+    setRunning(true);
+    setCurrent(c => ({ ...c, status: "live" }));
+    addLog(`Auction started for ${current.player.name}.`);
+  }
+
+  function pauseAuction() {
+    setRunning(false);
+    addLog("Auction paused by auctioneer.");
+  }
+
+  function resumeAuction() {
+    if (!current) return;
+    setRunning(true);
+    addLog("Auction resumed.");
+  }
+
+  function placeBid(managerId, amount) {
+    if (!current || current.status !== "live") return;
+    // If the auctioneer doesn't specify an amount, fall back to the standard +1 step
+    // (used by the manager quick-bid button). Otherwise the auctioneer's own figure wins.
+    const bidAmount = amount !== undefined && amount !== null && amount !== ""
+      ? Number(amount)
+      : current.bid + BID_STEP;
+
+    if (!Number.isFinite(bidAmount) || bidAmount <= current.bid) {
+      addLog(`Bid rejected — ${Number.isFinite(bidAmount) ? crFmt(bidAmount) : "that amount"} is not higher than the current bid of ${crFmt(current.bid)}.`);
+      return;
+    }
+    if (budgets[managerId] < bidAmount) {
+      addLog(`${label(managerId)} tried to bid but doesn't have enough budget.`);
+      return;
+    }
+    if (squads[managerId].length >= SQUAD_SIZE) {
+      addLog(`${label(managerId)} squad is already full.`);
+      return;
+    }
+    setCurrent(c => ({ ...c, bid: bidAmount, bidder: managerId }));
+    setBidHistory(h => [{ managerId, amount: bidAmount }, ...h]);
+    setTimeLeft(TIMER_SECONDS); // reset timer on new bid, like a live auction
+    addLog(`${label(managerId)} bids ${crFmt(bidAmount)}.`);
+  }
+
+  function label(id) {
+    return managers.find(m => m.id === id)?.name ?? id;
+  }
+
+  function finishAuction() {
+    setRunning(false);
+    if (!current) return;
+    if (current.bidder) {
+      const mid = current.bidder;
+      setBudgets(b => ({ ...b, [mid]: b[mid] - current.bid }));
+      setSquads(s => ({ ...s, [mid]: [...s[mid], { ...current.player, price: current.bid }] }));
+      setCurrent(c => ({ ...c, status: "sold" }));
+      addLog(`SOLD — ${current.player.name} to ${label(mid)} for ${crFmt(current.bid)}.`);
+      setPool(p => p.filter(pl => pl.id !== current.player.id));
+    } else {
+      setCurrent(c => ({ ...c, status: "unsold" }));
+      addLog(`${current.player.name} went UNSOLD — no bids.`);
+    }
+  }
+
+  function markSoldNow() {
+    setRunning(false);
+    finishAuction();
+  }
+
+  function skipPlayer() {
+    if (!current) return;
+    setRunning(false);
+    addLog(`${current.player.name} skipped by auctioneer.`);
+    setCurrent(null);
+  }
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      <TopBar viewAs={viewAs} setViewAs={setViewAs} poolCount={pool.length} managers={managers} addManager={addManager} />
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[280px_1fr_300px] gap-4 p-4 max-w-[1400px] w-full mx-auto">
+        <LeftPanel budgets={budgets} squads={squads} managers={managers} removeManager={removeManager} />
+        <CenterStage
+          current={current}
+          timeLeft={timeLeft}
+          running={running}
+          bidHistory={bidHistory}
+          budgets={budgets}
+          viewAs={viewAs}
+          placeBid={placeBid}
+          managers={managers}
+        />
+        <RightPanel
+          viewAs={viewAs}
+          pool={pool}
+          current={current}
+          running={running}
+          selectPlayer={selectPlayer}
+          startAuction={startAuction}
+          pauseAuction={pauseAuction}
+          resumeAuction={resumeAuction}
+          markSoldNow={markSoldNow}
+          skipPlayer={skipPlayer}
+          log={log}
+          budgets={budgets}
+          squads={squads}
+          placeBid={placeBid}
+          managers={managers}
+          defaultBasePrice={defaultBasePrice}
+          setDefaultBasePrice={setDefaultBasePrice}
+          updateBasePrice={updateBasePrice}
+        />
+      </div>
+      <footer className="text-center text-xs py-3" style={{ color: "var(--muted)" }}>
+       
+      </footer>
+    </div>
+  );
+}
+
+// ---------- Top bar ----------
+function TopBar({ viewAs, setViewAs, poolCount, managers, addManager }) {
+  const [joinName, setJoinName] = useState("");
+
+  function handleJoin(e) {
+    e.preventDefault();
+    const id = addManager(joinName);
+    if (id) {
+      setViewAs(id);
+      setJoinName("");
+    }
+  }
+
+  return (
+    <div className="border-b" style={{ borderColor: "var(--panel-line)", background: "var(--pitch-deep)" }}>
+      <div className="max-w-[1400px] mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-baseline gap-3">
+          <span className="display text-3xl leading-none" style={{ color: "var(--gold)" }}>FOOTBALL AUCTION</span>
+          <span className="text-sm" style={{ color: "var(--muted)" }}>Room: FRIDAY-FOOTBALL · Code FTB7X9 · {poolCount} players left</span>
+        </div>
+        <div className="flex flex-wrap items-center gap-3 text-sm">
+          <form onSubmit={handleJoin} className="flex items-center gap-2">
+            <label htmlFor="join-name-input" className="sr-only">Your name</label>
+            <input
+              id="join-name-input"
+              value={joinName}
+              onChange={e => setJoinName(e.target.value)}
+              placeholder="Your name…"
+              maxLength={MAX_NAME_LENGTH}
+              className="rounded px-2 py-1 text-sm"
+              style={{ background: "var(--panel)", border: "1px solid var(--panel-line)", color: "var(--chalk)" }}
+            />
+            <button
+              type="submit"
+              disabled={!joinName.trim()}
+              className="rounded px-3 py-1 font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}
+            >
+              Join as manager
+            </button>
+          </form>
+          <div className="flex items-center gap-2">
+            <span style={{ color: "var(--muted)" }}>Viewing as</span>
+            <select
+              aria-label="Viewing as"
+              value={viewAs}
+              onChange={e => setViewAs(e.target.value)}
+              className="rounded px-2 py-1 text-sm"
+              style={{ background: "var(--panel)", border: "1px solid var(--panel-line)", color: "var(--chalk)" }}
+            >
+              <option value="auctioneer">Auctioneer</option>
+              {managers.map(m => (
+                <option key={m.id} value={m.id}>{m.name} (Manager)</option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Left panel: budgets + squads ----------
+function LeftPanel({ budgets, squads, managers, removeManager }) {
+  return (
+    <div className="rounded-lg p-4 space-y-4" style={{ background: "var(--panel)", border: "1px solid var(--panel-line)" }}>
+      <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>Managers</h2>
+      {managers.length === 0 && (
+        <p className="text-xs" style={{ color: "var(--muted)" }}>No managers yet — enter a name up top to join.</p>
+      )}
+      {managers.map(m => (
+        <div key={m.id} className="rounded p-3" style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)" }}>
+          <div className="flex items-center justify-between">
+            <span className="font-semibold" style={{ color: m.color }}>{m.name}</span>
+            <span className="display text-xl" style={{ color: "var(--chalk)" }}>{crFmt(budgets[m.id])}</span>
+          </div>
+          <div className="mt-2 text-xs" style={{ color: "var(--muted)" }}>
+            Squad {squads[m.id].length} / {SQUAD_SIZE}
+          </div>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {squads[m.id].map(p => (
+              <span key={p.id} className="text-[11px] px-1.5 py-0.5 rounded" style={{ background: "var(--panel)", border: "1px solid var(--panel-line)" }}>
+                {p.name.split(" ").slice(-1)[0]}
+              </span>
+            ))}
+            {squads[m.id].length === 0 && (
+              <span className="text-[11px]" style={{ color: "var(--muted)" }}>No players yet</span>
+            )}
+          </div>
+          {squads[m.id].length === 0 && (
+            <button
+              onClick={() => removeManager(m.id)}
+              aria-label={`Remove ${m.name} from the auction`}
+              className="mt-2 text-[11px] underline"
+              style={{ color: "var(--muted)" }}
+            >
+              Remove
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------- Center stage: the live auction card ----------
+function CenterStage({ current, timeLeft, running, bidHistory, budgets, viewAs, placeBid, managers }) {
+  const isManager = viewAs !== "auctioneer";
+
+  return (
+    <div className="rounded-lg p-6 flex flex-col items-center justify-center text-center min-h-[480px]"
+      style={{ background: "var(--panel)", border: "1px solid var(--panel-line)" }}>
+      {!current && (
+        <div style={{ color: "var(--muted)" }}>
+          <p className="display text-3xl" style={{ color: "var(--chalk)" }}>No player under auction</p>
+          <p className="mt-2 text-sm">Waiting for the auctioneer to select the next player.</p>
+        </div>
+      )}
+
+      {current && (
+        <React.Fragment>
+          <div className="text-xs uppercase tracking-wide mb-2" style={{ color: "var(--muted)" }}>
+            {current.status === "sold" ? "Sold" : current.status === "unsold" ? "Unsold" : "Player on auction"}
+          </div>
+          <h1 className="display text-6xl leading-none" style={{ color: "var(--chalk)" }}>{current.player.name}</h1>
+          <p className="mt-1 text-sm" style={{ color: "var(--muted)" }}>
+            {current.player.pos} · {current.player.club} · {current.player.nation} · Rating {current.player.rating}
+          </p>
+
+          <div className="mt-6 text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>
+            Base price {crFmt(current.base)}
+          </div>
+          <div className="display text-7xl mt-1" style={{ color: "var(--gold)" }}>
+            {crFmt(current.bid)}
+          </div>
+          <div className="text-sm mt-1" style={{ color: current.bidder ? "var(--chalk)" : "var(--muted)" }}>
+            {current.bidder ? `Highest bidder: ${managers.find(m => m.id === current.bidder)?.name ?? "Unknown"}` : "No bids yet"}
+          </div>
+
+          {current.status === "live" && (
+            <div
+              className="display text-5xl mt-4"
+              style={{ color: timeLeft <= 5 ? "var(--bid-alert)" : "var(--chalk)" }}
+              role="timer"
+              aria-live="polite"
+              aria-atomic="true"
+              aria-label={`${timeLeft} seconds remaining`}
+            >
+              00:{String(timeLeft).padStart(2, "0")}
+            </div>
+          )}
+
+          {current.status === "sold" && (
+            <div className="mt-4 px-4 py-1 rounded font-semibold" style={{ background: "var(--gold)", color: "var(--pitch-deep)" }} role="status" aria-live="polite">
+              SOLD
+            </div>
+          )}
+          {current.status === "unsold" && (
+            <div className="mt-4 px-4 py-1 rounded font-semibold" style={{ background: "var(--bid)", color: "#ffffff" }} role="status" aria-live="polite">
+              UNSOLD
+            </div>
+          )}
+
+          {bidHistory.length > 0 && (
+            <div className="mt-6 flex flex-wrap gap-2 justify-center">
+              {bidHistory.slice(0, 6).map((b, i) => {
+                const m = managers.find(mm => mm.id === b.managerId);
+                return (
+                  <span key={i} className="text-xs px-2 py-1 rounded" style={{ background: "var(--pitch-deep)", border: `1px solid ${m?.color ?? "var(--panel-line)"}` }}>
+                    {m?.name ?? "Unknown"} {crFmt(b.amount)}
+                  </span>
+                );
+              })}
+            </div>
+          )}
+
+          {isManager && current.status === "live" && (
+            <p className="mt-8 text-xs" style={{ color: "var(--muted)" }}>
+              Call out your bid — the auctioneer will record it. Your budget: {crFmt(budgets[viewAs])}.
+            </p>
+          )}
+        </React.Fragment>
+      )}
+    </div>
+  );
+}
+
+// ---------- Auctioneer-controlled bid entry ----------
+// The auctioneer calls out whatever bid is actually made on the floor and assigns it to
+// a manager — the app no longer just auto-suggests the next +1cr step.
+function AuctioneerBidEntry({ current, budgets, squads, placeBid, managers }) {
+  const [managerId, setManagerId] = useState(managers[0]?.id ?? "");
+  const [amount, setAmount] = useState(current.bid + BID_STEP);
+
+  // Keep the input pre-filled with a sensible next amount, but the auctioneer can change it.
+  useEffect(() => {
+    setAmount(current.bid + BID_STEP);
+  }, [current.bid]);
+
+  // If the selected manager left (or none was selected yet), fall back to the first available.
+  useEffect(() => {
+    if (!managers.some(m => m.id === managerId)) {
+      setManagerId(managers[0]?.id ?? "");
+    }
+  }, [managers, managerId]);
+
+  const numericAmount = Number(amount);
+  const isValid = Number.isFinite(numericAmount) && numericAmount > current.bid && !!managerId;
+
+  function submit() {
+    if (!isValid) return;
+    placeBid(managerId, numericAmount);
+  }
+
+  if (managers.length === 0) {
+    return (
+      <div className="pt-2 border-t" style={{ borderColor: "var(--panel-line)" }}>
+        <p className="text-xs" style={{ color: "var(--muted)" }}>No managers have joined yet — share the page so people can enter their name up top.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="pt-2 border-t flex flex-col gap-2" style={{ borderColor: "var(--panel-line)" }}>
+      <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>Call a bid</h2>
+      <p className="text-[11px]" style={{ color: "var(--muted)" }}>
+        Enter the amount actually called out — it doesn't have to be the suggested step.
+      </p>
+      <div className="flex gap-2">
+        <select
+          aria-label="Manager placing the bid"
+          value={managerId}
+          onChange={e => setManagerId(e.target.value)}
+          className="flex-1 rounded px-2 py-1.5 text-sm"
+          style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)", color: "var(--chalk)" }}
+        >
+          {managers.map(m => (
+            <option key={m.id} value={m.id}>{m.name} — {crFmt(budgets[m.id])} left</option>
+          ))}
+        </select>
+        <input
+          aria-label="Bid amount in crores"
+          type="number"
+          min={current.bid + 1}
+          step={1}
+          value={amount}
+          onChange={e => setAmount(e.target.value)}
+          className="w-24 rounded px-2 py-1.5 text-sm"
+          style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)", color: "var(--chalk)" }}
+        />
+      </div>
+      <button
+        onClick={submit}
+        disabled={!isValid}
+        className="rounded-md py-2 font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+        style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}
+      >
+        Confirm bid — {crFmt(Number.isFinite(numericAmount) ? numericAmount : current.bid + BID_STEP)} to {managers.find(m => m.id === managerId)?.name ?? "—"}
+      </button>
+      {!isValid && (
+        <p className="text-[11px]" style={{ color: "var(--muted)" }}>Bid must be higher than the current {crFmt(current.bid)}.</p>
+      )}
+    </div>
+  );
+}
+
+// ---------- Setup: the default base price applied to every newly-selected player ----------
+function DefaultBasePriceControl({ defaultBasePrice, setDefaultBasePrice }) {
+  const [amount, setAmount] = useState(defaultBasePrice);
+
+  const numericAmount = Number(amount);
+  const isValid = Number.isFinite(numericAmount) && numericAmount > 0;
+
+  function apply() {
+    if (!isValid) return;
+    setDefaultBasePrice(numericAmount);
+  }
+
+  return (
+    <div className="pb-2 border-b flex flex-col gap-2" style={{ borderColor: "var(--panel-line)" }}>
+      <label htmlFor="default-base-input" className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>
+        Default base price
+      </label>
+      <div className="flex gap-2">
+        <input
+          id="default-base-input"
+          type="number"
+          min={1}
+          step={1}
+          value={amount}
+          onChange={e => setAmount(e.target.value)}
+          className="flex-1 rounded px-2 py-1.5 text-sm"
+          style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)", color: "var(--chalk)" }}
+        />
+        <button
+          onClick={apply}
+          disabled={!isValid}
+          className="rounded-md px-3 py-1.5 text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+          style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}
+        >
+          Set
+        </button>
+      </div>
+      <p className="text-[11px]" style={{ color: "var(--muted)" }}>
+        Currently {crFmt(defaultBasePrice)}. Applied to every player you select from now on — you can still override it per player below.
+      </p>
+    </div>
+  );
+}
+
+// ---------- Per-player override, shown after a player is selected and before the auction goes live ----------
+function BasePriceControl({ current, updateBasePrice }) {
+  const [amount, setAmount] = useState(current.base);
+
+  // Re-sync the input only when a different player is selected, not on every keystroke.
+  useEffect(() => {
+    setAmount(current.base);
+  }, [current.player.id]);
+
+  const numericAmount = Number(amount);
+  const isValid = Number.isFinite(numericAmount) && numericAmount > 0;
+
+  function apply() {
+    if (!isValid) return;
+    updateBasePrice(numericAmount);
+  }
+
+  return (
+    <div className="pt-2 border-t flex flex-col gap-2" style={{ borderColor: "var(--panel-line)" }}>
+      <label htmlFor="player-base-input" className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>
+        Base price for {current.player.name}
+      </label>
+      <div className="flex gap-2">
+        <input
+          id="player-base-input"
+          type="number"
+          min={1}
+          step={1}
+          value={amount}
+          onChange={e => setAmount(e.target.value)}
+          className="flex-1 rounded px-2 py-1.5 text-sm"
+          style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)", color: "var(--chalk)" }}
+        />
+        <button
+          onClick={apply}
+          disabled={!isValid}
+          className="rounded-md px-3 py-1.5 text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+          style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}
+        >
+          Override
+        </button>
+      </div>
+      {!isValid && (
+        <p className="text-[11px]" style={{ color: "var(--muted)" }}>Enter a base price greater than 0.</p>
+      )}
+    </div>
+  );
+}
+
+// ---------- Right panel: auctioneer controls or manager log ----------
+function RightPanel(props) {
+  const { viewAs, pool, current, running, selectPlayer, startAuction, pauseAuction, resumeAuction, markSoldNow, skipPlayer, log, budgets, squads, placeBid, managers, defaultBasePrice, setDefaultBasePrice, updateBasePrice } = props;
+  const [search, setSearch] = useState("");
+  const filtered = pool.filter(p => p.name.toLowerCase().includes(search.toLowerCase()));
+
+  return (
+    <div className="rounded-lg p-4 flex flex-col gap-4" style={{ background: "var(--panel)", border: "1px solid var(--panel-line)" }}>
+      {viewAs === "auctioneer" ? (
+        <React.Fragment>
+          <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>Auction control</h2>
+
+          <DefaultBasePriceControl defaultBasePrice={defaultBasePrice} setDefaultBasePrice={setDefaultBasePrice} />
+
+          <input
+            aria-label="Search player by name"
+            placeholder="Search player…"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            className="rounded px-2 py-1.5 text-sm"
+            style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)", color: "var(--chalk)" }}
+          />
+          <div className="max-h-40 overflow-y-auto flex flex-col gap-1">
+            {filtered.map(p => (
+              <button
+                key={p.id}
+                onClick={() => selectPlayer(p)}
+                disabled={running}
+                className="text-left text-sm px-2 py-1.5 rounded disabled:opacity-40"
+                style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)" }}
+              >
+                <span className="font-medium">{p.name}</span>
+                <span className="ml-2 text-xs" style={{ color: "var(--muted)" }}>{p.pos} · {p.club}</span>
+              </button>
+            ))}
+            {filtered.length === 0 && <p className="text-xs" style={{ color: "var(--muted)" }}>No matches.</p>}
+          </div>
+
+          {current && current.status === "idle" && (
+            <BasePriceControl current={current} updateBasePrice={updateBasePrice} />
+          )}
+
+          <div className="pt-2 border-t flex flex-col gap-2" style={{ borderColor: "var(--panel-line)" }}>
+            {!running && current && current.status === "idle" && (
+              <button
+                onClick={startAuction}
+                disabled={managers.length === 0}
+                aria-label={managers.length === 0 ? "Start auction — add a manager first" : "Start auction"}
+                className="rounded-md py-2 font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}
+              >
+                Start auction
+              </button>
+            )}
+            {running && (
+              <button onClick={pauseAuction} className="rounded-md py-2 font-semibold" style={{ background: "var(--panel-line)", color: "var(--chalk)" }}>
+                Pause
+              </button>
+            )}
+            {!running && current && current.status === "live" && (
+              <button onClick={resumeAuction} className="rounded-md py-2 font-semibold" style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}>
+                Resume
+              </button>
+            )}
+            {current && (current.status === "live") && (
+              <button onClick={markSoldNow} className="rounded-md py-2 font-semibold" style={{ background: "#3a7a52", color: "var(--chalk)" }}>
+                End now (Sold/Unsold)
+              </button>
+            )}
+            {current && current.status !== "sold" && (
+              <button onClick={skipPlayer} aria-label="Skip this player without a sale" className="rounded-md py-2 font-semibold" style={{ background: "var(--bid)", color: "#ffffff" }}>
+                Skip player
+              </button>
+            )}
+          </div>
+
+          {current && current.status === "live" && (
+            <AuctioneerBidEntry current={current} budgets={budgets} squads={squads} placeBid={placeBid} managers={managers} />
+          )}
+        </React.Fragment>
+      ) : (
+        <div>
+          <h2 className="text-xs uppercase tracking-wide mb-2" style={{ color: "var(--muted)" }}>Your status</h2>
+          <p className="text-sm" style={{ color: "var(--muted)" }}>
+            You're watching as <span style={{ color: "var(--chalk)" }}>{managers.find(m => m.id === viewAs)?.name ?? "—"}</span>.
+            Only the auctioneer can enter bids — call yours out loud and they'll record it against your budget.
+            Switch "Viewing as" at the top to check other managers or the auctioneer view.
+          </p>
+        </div>
+      )}
+
+      <div className="pt-2 border-t flex-1 min-h-0" style={{ borderColor: "var(--panel-line)" }}>
+        <h2 className="text-xs uppercase tracking-wide mb-2" style={{ color: "var(--muted)" }}>Auction log</h2>
+        <div
+          className="text-xs space-y-1 max-h-56 overflow-y-auto"
+          style={{ color: "var(--muted)" }}
+          role="log"
+          aria-live="polite"
+          aria-relevant="additions"
+          aria-label="Auction activity log"
+        >
+          {log.map((l, i) => <p key={i}>{l}</p>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
