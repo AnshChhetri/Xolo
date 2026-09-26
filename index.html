@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>Football Auction</title>
+<title>XOLO</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Teko:wght@400;500;600;700&family=Work+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -256,7 +256,15 @@ function clubName(manager) {
 
 function managerLabel(manager) {
   if (!manager) return "Unknown";
+  if (manager.bot) return `${clubName(manager)} (CPU)`;
   return `${clubName(manager)} (${manager.name})`;
+}
+
+// Bots are named after their club, so managerLabel/(m.name) would read "Arsenal (Arsenal)" —
+// this gives a cleaner "Arsenal (CPU)" for bots and falls back to the human's name otherwise.
+function managerDisplayName(manager) {
+  if (!manager) return "Unknown";
+  return manager.bot ? `${manager.name} (CPU)` : manager.name;
 }
 
 const START_BUDGET = 100; // Cr
@@ -385,8 +393,146 @@ function executeCpuAuction({ pool, managers, budgets, squads, defaultBasePrice, 
   return { nextPool, nextBudgets, nextSquads, logs };
 }
 
+// After the competitive CPU bidding above, budget constraints can leave some managers short
+// of a full XI (they simply couldn't afford or win enough players). This pass tops every
+// manager up to exactly SQUAD_SIZE using whatever's left in the pool, favouring positions
+// they're still missing, and charging whatever they can still afford (as low as ₹0 if a
+// manager is broke) so "Simulate entire auction" always finishes with complete squads.
+function neededPositionsFor(squad) {
+  const need = new Set();
+  Object.keys(XI_TARGETS).forEach(pos => {
+    const have = (squad || []).filter(p => p.pos === pos).length;
+    if (have < XI_TARGETS[pos]) need.add(pos);
+  });
+  return need;
+}
+
+function backfillSquads({ managers, budgets, squads, pool, defaultBasePrice }) {
+  const remainingPool = [...pool];
+  const nextBudgets = { ...budgets };
+  const nextSquads = {};
+  managers.forEach(m => {
+    nextSquads[m.id] = [...(squads[m.id] || [])];
+  });
+  const addedCount = {};
+  const addedCost = {};
+
+  let needer = shuffleList(managers.filter(m => nextSquads[m.id].length < SQUAD_SIZE));
+  let guard = 0;
+  while (needer.length > 0 && remainingPool.length > 0 && guard < 5000) {
+    guard += 1;
+    for (const m of needer) {
+      if (nextSquads[m.id].length >= SQUAD_SIZE || remainingPool.length === 0) continue;
+      const need = neededPositionsFor(nextSquads[m.id]);
+      let idx = remainingPool.findIndex(p => need.has(p.pos));
+      if (idx === -1) idx = 0;
+      const player = remainingPool[idx];
+      const price = Math.max(0, Math.min(defaultBasePrice, nextBudgets[m.id]));
+      nextBudgets[m.id] -= price;
+      nextSquads[m.id].push({ ...player, price });
+      remainingPool.splice(idx, 1);
+      addedCount[m.id] = (addedCount[m.id] || 0) + 1;
+      addedCost[m.id] = (addedCost[m.id] || 0) + price;
+    }
+    needer = needer.filter(m => nextSquads[m.id].length < SQUAD_SIZE);
+  }
+
+  const logs = managers
+    .filter(m => addedCount[m.id])
+    .map(m => `Auto-filled ${addedCount[m.id]} more player${addedCount[m.id] === 1 ? "" : "s"} for ${managerLabel(m)} to complete their XI (${crFmt(addedCost[m.id])} total).`);
+
+  const shortfall = managers.filter(m => nextSquads[m.id].length < SQUAD_SIZE);
+  if (shortfall.length > 0) {
+    logs.push(`Not enough players left in the pool to fully complete ${shortfall.length} squad${shortfall.length === 1 ? "" : "s"} (${shortfall.map(m => managerLabel(m)).join(", ")}).`);
+  }
+
+  return { nextPool: remainingPool, nextBudgets, nextSquads, logs };
+}
+
 function makeManagerId() {
   return `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+// When simulating an auction with too few managers to be a real contest (e.g. a solo player),
+// we top the room up to this many seats with CPU bots before running the simulation. Bots bid
+// generally and competitively for any player (via cpuMaxBid/cpuAuctionOne below) — they are not
+// restricted to players who actually play for their assigned club.
+const SIMULATE_TARGET_MANAGERS = 8;
+
+function addBotManagers(existingManagers, targetCount) {
+  const bots = [];
+  let running = [...existingManagers];
+  const cap = Math.min(targetCount, MAX_MANAGERS);
+  while (running.length < cap) {
+    const club = pickNextClub(running);
+    const bot = {
+      id: makeManagerId(),
+      name: club,
+      color: MANAGER_COLORS[running.length % MANAGER_COLORS.length],
+      club,
+      bot: true,
+    };
+    bots.push(bot);
+    running = [...running, bot];
+  }
+  return bots;
+}
+
+// The Premier League season always features all 20 real clubs, regardless of how many
+// people actually took part in the auction. A club a manager drafted uses that manager's
+// actual won squad; any club nobody claimed gets a CPU-only team built from real players in
+// the pool who genuinely play for that club (padded with generic reserves if the pool doesn't
+// have a full XI's worth for them). These CPU-only teams are kept separate from the auction's
+// managers/budgets/squads state — they never touch anyone's budget or the draft pool.
+function buildLeagueTeams(managers, squads) {
+  const claimedByClub = {};
+  managers.forEach(m => {
+    if (m.club) claimedByClub[m.club] = m;
+  });
+
+  return PREMIER_LEAGUE_CLUBS_2026_27.map(club => {
+    const manager = claimedByClub[club];
+    if (manager) {
+      return {
+        id: club,
+        club,
+        managerId: manager.id,
+        managerName: manager.name,
+        isCpu: !!manager.bot,
+        color: manager.color,
+        squad: squads[manager.id] || [],
+      };
+    }
+
+    const realPlayers = PLAYER_POOL
+      .filter(p => p.club === club)
+      .sort((a, b) => b.rating - a.rating);
+    const squad = realPlayers.slice(0, SQUAD_SIZE).map(p => ({ ...p }));
+    if (squad.length < SQUAD_SIZE) {
+      const avg = squad.length ? averageRating(squad) : 76;
+      const missing = SQUAD_SIZE - squad.length;
+      for (let i = 0; i < missing; i++) {
+        squad.push({
+          id: `filler_${club}_${i}`,
+          name: `${club} Reserve`,
+          pos: Object.keys(XI_TARGETS)[i % Object.keys(XI_TARGETS).length],
+          club,
+          nation: "—",
+          rating: Math.max(58, Math.round(avg - 4 - i)),
+        });
+      }
+    }
+
+    return {
+      id: club,
+      club,
+      managerId: null,
+      managerName: null,
+      isCpu: true,
+      color: null,
+      squad,
+    };
+  });
 }
 
 const BYE_ID = "BYE";
@@ -458,12 +604,12 @@ function isRealFixture(f) {
   return f && f.home !== BYE_ID && f.away !== BYE_ID;
 }
 
-function computeStandings(managers, fixtures) {
+function computeStandings(teams, fixtures) {
   const rows = {};
-  managers.forEach(m => {
-    rows[m.id] = {
-      id: m.id,
-      name: m.name,
+  teams.forEach(t => {
+    rows[t.id] = {
+      id: t.id,
+      name: t.club,
       Played: 0,
       Won: 0,
       Drawn: 0,
@@ -548,6 +694,7 @@ function App() {
   const [phase, setPhase] = useState("auction");
   const [fixtures, setFixtures] = useState([]);
   const [lastSimulatedKeys, setLastSimulatedKeys] = useState([]);
+  const [leagueTeams, setLeagueTeams] = useState([]); // all 20 PL clubs — drafted ones use the manager's squad, the rest are CPU-only
   const timerRef = useRef(null);
 
   useEffect(() => {
@@ -691,7 +838,7 @@ function App() {
   }
 
   function label(id) {
-    return managers.find(m => m.id === id)?.name ?? id;
+    return managerDisplayName(managers.find(m => m.id === id)) ?? id;
   }
 
   function finishAuction() {
@@ -722,26 +869,88 @@ function App() {
     setCurrent(null);
   }
 
-  function startLeague() {
-    if (managers.length < 2) {
-      addLog("Need at least two managers to start the Premier League.");
+  function simulateEntireAuction() {
+    if (managers.length === 0) {
+      addLog("Add yourself as a manager before simulating the auction.");
       return;
     }
-    setFixtures(generateFixtures(managers.map(m => m.id)));
+    setRunning(false);
+
+    // Snapshot the state we'll simulate against. If it's currently a solo (or near-solo) room,
+    // top it up with CPU bot managers first so there's real competition for every player.
+    let simManagers = managers;
+    let simBudgets = budgets;
+    let simSquads = squads;
+
+    if (managers.length < SIMULATE_TARGET_MANAGERS) {
+      const bots = addBotManagers(managers, SIMULATE_TARGET_MANAGERS);
+      if (bots.length > 0) {
+        simManagers = [...managers, ...bots];
+        simBudgets = { ...budgets };
+        simSquads = { ...squads };
+        bots.forEach(b => {
+          simBudgets[b.id] = START_BUDGET;
+          simSquads[b.id] = [];
+        });
+        setManagers(simManagers);
+        setBudgets(simBudgets);
+        setSquads(simSquads);
+        addLog(`Added ${bots.length} CPU bot manager${bots.length === 1 ? "" : "s"} for real competition, then simulated the rest of the auction.`);
+      }
+    }
+
+    const result = executeCpuAuction({
+      pool,
+      managers: simManagers,
+      budgets: simBudgets,
+      squads: simSquads,
+      defaultBasePrice,
+      current,
+    });
+
+    // Competitive bidding alone can leave some managers short of a full XI if their budget
+    // runs dry — top everyone up to SQUAD_SIZE from what's left in the pool.
+    const filled = backfillSquads({
+      managers: simManagers,
+      budgets: result.nextBudgets,
+      squads: result.nextSquads,
+      pool: result.nextPool,
+      defaultBasePrice,
+    });
+
+    setPool(filled.nextPool);
+    setBudgets(filled.nextBudgets);
+    setSquads(filled.nextSquads);
+    setCurrent(null);
+    setBidHistory([]);
+    setLog(l => [...[...filled.logs].reverse(), ...[...result.logs].reverse(), ...l].slice(0, 30));
+  }
+
+  function startLeague() {
+    // The season always runs as a full 20-club Premier League. Any club a manager actually
+    // drafted uses their real squad; every other club is filled by a CPU-only team.
+    const teams = buildLeagueTeams(managers, squads);
+    setLeagueTeams(teams);
+    setFixtures(generateFixtures(teams.map(t => t.id)));
     setLastSimulatedKeys([]);
     setPhase("league");
-    addLog("Premier League started.");
+    const cpuCount = teams.filter(t => !t.managerId).length;
+    addLog(cpuCount > 0
+      ? `Premier League started — all 20 clubs are in, with ${cpuCount} CPU team${cpuCount === 1 ? "" : "s"} filling the clubs nobody drafted.`
+      : "Premier League started — all 20 clubs are in.");
   }
 
   function simulateMatchday(index) {
+    const squadsByTeam = Object.fromEntries(leagueTeams.map(t => [t.id, t.squad]));
     const before = fixtures[index] || [];
     const keys = before.filter(f => isRealFixture(f) && !f.played).map(f => fixtureKey(index, f));
     setLastSimulatedKeys(keys);
-    setFixtures(prev => playMatchday(prev, index, squads));
+    setFixtures(prev => playMatchday(prev, index, squadsByTeam));
     addLog(`Matchday ${index + 1} simulated.`);
   }
 
   function simulateFullSeason() {
+    const squadsByTeam = Object.fromEntries(leagueTeams.map(t => [t.id, t.squad]));
     const keys = [];
     fixtures.forEach((matchday, i) => {
       matchday.forEach(f => {
@@ -753,7 +962,7 @@ function App() {
       let next = prev;
       for (let i = 0; i < next.length; i++) {
         const hadUnplayed = (next[i] || []).some(f => isRealFixture(f) && !f.played);
-        if (hadUnplayed) next = playMatchday(next, i, squads);
+        if (hadUnplayed) next = playMatchday(next, i, squadsByTeam);
       }
       return next;
     });
@@ -765,8 +974,7 @@ function App() {
       <TopBar viewAs={viewAs} setViewAs={setViewAs} poolCount={pool.length} managers={managers} addManager={addManager} phase={phase} />
       {phase === "league" ? (
         <LeagueView
-          managers={managers}
-          squads={squads}
+          teams={leagueTeams}
           fixtures={fixtures}
           simulateMatchday={simulateMatchday}
           simulateFullSeason={simulateFullSeason}
@@ -807,6 +1015,7 @@ function App() {
           updateBasePrice={updateBasePrice}
           phase={phase}
           startLeague={startLeague}
+          simulateEntireAuction={simulateEntireAuction}
         />
       </div>
       )}
@@ -834,7 +1043,7 @@ function TopBar({ viewAs, setViewAs, poolCount, managers, addManager, phase }) {
     <div className="border-b" style={{ borderColor: "var(--panel-line)", background: "var(--pitch-deep)" }}>
       <div className="max-w-[1400px] mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-baseline gap-3">
-          <span className="display text-3xl leading-none" style={{ color: "var(--gold)" }}>FOOTBALL AUCTION</span>
+          <span className="display text-3xl leading-none" style={{ color: "var(--gold)" }}>XOLO</span>
           <span className="text-sm" style={{ color: "var(--muted)" }}>Room: FRIDAY-FOOTBALL · Code FTB7X9 · {poolCount} players left</span>
         </div>
         <div className="flex flex-wrap items-center gap-3 text-sm">
@@ -871,7 +1080,7 @@ function TopBar({ viewAs, setViewAs, poolCount, managers, addManager, phase }) {
             >
               <option value="auctioneer">Auctioneer</option>
               {managers.map(m => (
-                <option key={m.id} value={m.id}>{m.name} (Manager)</option>
+                <option key={m.id} value={m.id}>{m.bot ? `${m.name} (CPU)` : `${m.name} (Manager)`}</option>
               ))}
             </select>
           </div>
@@ -894,7 +1103,7 @@ function LeftPanel({ budgets, squads, managers, removeManager }) {
           <div className="flex items-center justify-between">
             <span>
               <span className="font-semibold" style={{ color: m.color }}>{clubName(m)}</span>
-              <span className="ml-1 text-xs" style={{ color: "var(--muted)" }}>({m.name})</span>
+              <span className="ml-1 text-xs" style={{ color: "var(--muted)" }}>({m.bot ? "CPU" : m.name})</span>
             </span>
             <span className="display text-xl" style={{ color: "var(--chalk)" }}>{crFmt(budgets[m.id])}</span>
           </div>
@@ -958,7 +1167,7 @@ function CenterStage({ current, timeLeft, running, bidHistory, budgets, viewAs, 
             {crFmt(current.bid)}
           </div>
           <div className="text-sm mt-1" style={{ color: current.bidder ? "var(--chalk)" : "var(--muted)" }}>
-            {current.bidder ? `Highest bidder: ${managers.find(m => m.id === current.bidder)?.name ?? "Unknown"}` : "No bids yet"}
+            {current.bidder ? `Highest bidder: ${managerDisplayName(managers.find(m => m.id === current.bidder))}` : "No bids yet"}
           </div>
 
           {current.status === "live" && (
@@ -991,7 +1200,7 @@ function CenterStage({ current, timeLeft, running, bidHistory, budgets, viewAs, 
                 const m = managers.find(mm => mm.id === b.managerId);
                 return (
                   <span key={i} className="text-xs px-2 py-1 rounded" style={{ background: "var(--pitch-deep)", border: `1px solid ${m?.color ?? "var(--panel-line)"}` }}>
-                    {m?.name ?? "Unknown"} {crFmt(b.amount)}
+                    {managerDisplayName(m)} {crFmt(b.amount)}
                   </span>
                 );
               })}
@@ -1059,7 +1268,7 @@ function AuctioneerBidEntry({ current, budgets, squads, placeBid, managers }) {
           style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)", color: "var(--chalk)" }}
         >
           {managers.map(m => (
-            <option key={m.id} value={m.id}>{m.name} — {crFmt(budgets[m.id])} left</option>
+            <option key={m.id} value={m.id}>{managerDisplayName(m)} — {crFmt(budgets[m.id])} left</option>
           ))}
         </select>
         <input
@@ -1183,7 +1392,7 @@ function BasePriceControl({ current, updateBasePrice }) {
 
 // ---------- Right panel: auctioneer controls or manager log ----------
 function RightPanel(props) {
-  const { viewAs, pool, current, running, selectPlayer, startAuction, pauseAuction, resumeAuction, markSoldNow, skipPlayer, log, budgets, squads, placeBid, managers, defaultBasePrice, setDefaultBasePrice, updateBasePrice, phase, startLeague } = props;
+  const { viewAs, pool, current, running, selectPlayer, startAuction, pauseAuction, resumeAuction, markSoldNow, skipPlayer, log, budgets, squads, placeBid, managers, defaultBasePrice, setDefaultBasePrice, updateBasePrice, phase, startLeague, simulateEntireAuction } = props;
   const [search, setSearch] = useState("");
   const filtered = pool.filter(p => p.name.toLowerCase().includes(search.toLowerCase()));
 
@@ -1263,17 +1472,38 @@ function RightPanel(props) {
 
           {phase === "auction" && (
             <div className="pt-2 border-t flex flex-col gap-2" style={{ borderColor: "var(--panel-line)" }}>
+              <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>Fast-forward</h2>
+              <p className="text-[11px]" style={{ color: "var(--muted)" }}>
+                Instantly resolves every remaining player with CPU bidding.
+                {managers.length < SIMULATE_TARGET_MANAGERS
+                  ? ` Adds CPU bot managers first so it's a real contest, even solo.`
+                  : ""}
+              </p>
+              <button
+                onClick={simulateEntireAuction}
+                disabled={pool.length === 0}
+                aria-label="Simulate entire auction"
+                className="rounded-md py-2 font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{ background: "var(--panel-line)", color: "var(--chalk)" }}
+              >
+                Simulate entire auction
+              </button>
+            </div>
+          )}
+
+          {phase === "auction" && (
+            <div className="pt-2 border-t flex flex-col gap-2" style={{ borderColor: "var(--panel-line)" }}>
               <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>Premier League</h2>
-              {managers.some(m => (squads[m.id] || []).length < SQUAD_SIZE) && (
-                <p className="text-[11px]" style={{ color: "var(--muted)" }}>
-                  Some squads aren't full yet — you can still start the league.
-                </p>
-              )}
+              <p className="text-[11px]" style={{ color: "var(--muted)" }}>
+                Always a full 20-club season — any club nobody drafted plays as a CPU team built from real players.
+                {managers.some(m => (squads[m.id] || []).length < SQUAD_SIZE)
+                  ? " Some of your drafted squads aren't full yet, but you can still start."
+                  : ""}
+              </p>
               <button
                 onClick={startLeague}
-                disabled={managers.length < 2}
-                aria-label={managers.length < 2 ? "Start Premier League — need at least two managers" : "Start Premier League"}
-                className="rounded-md py-2 font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+                aria-label="Start Premier League"
+                className="rounded-md py-2 font-semibold"
                 style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}
               >
                 Start Premier League
@@ -1310,9 +1540,9 @@ function RightPanel(props) {
 }
 
 // ---------- League phase: table + fixtures ----------
-function LeagueView({ managers, squads, fixtures, simulateMatchday, simulateFullSeason, viewAs, lastSimulatedKeys }) {
-  const standings = computeStandings(managers, fixtures);
-  const byId = Object.fromEntries(managers.map(m => [m.id, m]));
+function LeagueView({ teams, fixtures, simulateMatchday, simulateFullSeason, viewAs, lastSimulatedKeys }) {
+  const standings = computeStandings(teams, fixtures);
+  const byId = Object.fromEntries(teams.map(t => [t.id, t]));
   const nextUnplayed = fixtures.findIndex(md => md.some(f => isRealFixture(f) && !f.played));
   const hasUnplayed = nextUnplayed !== -1;
   const isAuctioneer = viewAs === "auctioneer";
@@ -1342,11 +1572,20 @@ function LeagueView({ managers, squads, fixtures, simulateMatchday, simulateFull
           </thead>
           <tbody>
             {standings.map((row, i) => {
-              const m = byId[row.id];
+              const t = byId[row.id];
+              const isYou = !!t && t.managerId === viewAs;
               return (
-                <tr key={row.id} style={{ borderTop: "1px solid var(--panel-line)" }}>
+                <tr key={row.id} style={{ borderTop: "1px solid var(--panel-line)", background: isYou ? "var(--pitch-deep)" : "transparent" }}>
                   <td className="py-2 pr-2">{i + 1}</td>
-                  <td className="py-2 pr-2 font-semibold" style={{ color: m?.color || "var(--chalk)" }}>{clubName(m || row)}</td>
+                  <td className="py-2 pr-2 font-semibold" style={{ color: t?.color || "var(--chalk)" }}>
+                    {row.name}
+                    {t?.isCpu && (
+                      <span className="ml-1.5 text-[10px] font-normal uppercase tracking-wide px-1 py-0.5 rounded" style={{ background: "var(--panel-line)", color: "var(--muted)" }}>CPU</span>
+                    )}
+                    {isYou && (
+                      <span className="ml-1.5 text-[10px] font-normal uppercase tracking-wide px-1 py-0.5 rounded" style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}>You</span>
+                    )}
+                  </td>
                   <td className="py-2 pr-1 text-right">{row.Played}</td>
                   <td className="py-2 pr-1 text-right">{row.Won}</td>
                   <td className="py-2 pr-1 text-right">{row.Drawn}</td>
