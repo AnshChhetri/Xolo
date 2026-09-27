@@ -1179,9 +1179,22 @@ function App() {
 
   function applySharedState(state) {
     if (!state) return;
-    setManagers(state.managers || []);
-    setBudgets(state.budgets || {});
-    setSquads(state.squads || {});
+    const nextManagers = state.managers || [];
+    setManagers(nextManagers);
+    // Firebase Realtime Database drops keys whose value is an empty array/object
+    // (e.g. a brand-new manager's squads[id] = []), so a manager can arrive here
+    // with no budgets/squads entry at all. Backfill defaults for every manager so
+    // components that index squads[m.id]/budgets[m.id] never hit `undefined`.
+    const fallbackBudgets = state.budgets || {};
+    const fallbackSquads = state.squads || {};
+    const normalizedBudgets = { ...fallbackBudgets };
+    const normalizedSquads = { ...fallbackSquads };
+    nextManagers.forEach(manager => {
+      if (normalizedBudgets[manager.id] === undefined) normalizedBudgets[manager.id] = START_BUDGET;
+      if (!Array.isArray(normalizedSquads[manager.id])) normalizedSquads[manager.id] = [];
+    });
+    setBudgets(normalizedBudgets);
+    setSquads(normalizedSquads);
     setPool(Array.isArray(state.pool) ? state.pool : Object.values(state.pool || {}));
     setCurrent(state.current || null);
     setSkipVotes(state.skipVotes || []);
@@ -1543,7 +1556,7 @@ function App() {
       addLog(`${label(managerId)} tried to bid but doesn't have enough budget.`);
       return;
     }
-    if (squads[managerId].length >= SQUAD_SIZE) {
+    if ((squads[managerId] || []).length >= SQUAD_SIZE) {
       addLog(`${label(managerId)} squad is already full.`);
       return;
     }
@@ -2081,13 +2094,13 @@ function LeftPanel({ budgets, squads, managers, removeManager, canRemoveManagers
               <span className="font-bold text-sm" style={{ color: m.color || "var(--primary)" }}>{clubName(m)}</span>
               <span className="ml-1.5 text-xs font-medium" style={{ color: "var(--text-muted)" }}>({m.bot ? "CPU" : m.name})</span>
             </span>
-            <span className="display text-2xl font-bold" style={{ color: "var(--text)" }}>{crFmt(budgets[m.id])}</span>
+            <span className="display text-2xl font-bold" style={{ color: "var(--text)" }}>{crFmt(budgets[m.id] || 0)}</span>
           </div>
           <div className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
-            Squad {squads[m.id].length} / {SQUAD_SIZE}
+            Squad {(squads[m.id] || []).length} / {SQUAD_SIZE}
           </div>
           <div className="flex flex-wrap gap-1.5">
-            {squads[m.id].map(p => (
+            {(squads[m.id] || []).map(p => (
               <span
                 key={p.id}
                 className="inline-flex items-center gap-1.5 text-[11px] font-medium pl-1 pr-2.5 py-0.5 rounded-full"
@@ -2097,11 +2110,11 @@ function LeftPanel({ budgets, squads, managers, removeManager, canRemoveManagers
                 {p.name.split(" ").slice(-1)[0]}
               </span>
             ))}
-            {squads[m.id].length === 0 && (
+            {(squads[m.id] || []).length === 0 && (
               <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>No players yet</span>
             )}
           </div>
-          {canRemoveManagers && squads[m.id].length === 0 && (
+          {canRemoveManagers && (squads[m.id] || []).length === 0 && (
             <button
               onClick={() => removeManager(m.id)}
               aria-label={`Remove ${m.name} from the auction`}
@@ -2619,7 +2632,59 @@ function LeagueView({ teams, fixtures, simulateMatchday, simulateFullSeason, vie
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+// ---------- Error boundary ----------
+// Without this, any unexpected render error (e.g. a data shape mismatch coming
+// from Firebase) unmounts the whole React tree and leaves a blank white screen
+// with no way to recover except a manual refresh. This catches that and shows
+// a friendly recovery screen instead.
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, info) {
+    console.error("XOLO render error:", error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{
+          minHeight: "100vh", display: "flex", flexDirection: "column",
+          alignItems: "center", justifyContent: "center", gap: "1rem",
+          background: "#0B0D0F", color: "#FFFFFF", fontFamily: "Inter, sans-serif",
+          padding: "2rem", textAlign: "center"
+        }}>
+          <h1 style={{ fontSize: "1.5rem", fontWeight: 700 }}>Something went wrong</h1>
+          <p style={{ color: "#A7AFB7", maxWidth: "28rem" }}>
+            The app hit an unexpected error and couldn't continue rendering. Reloading usually fixes this.
+          </p>
+          <p style={{ color: "#707A83", fontSize: "0.8rem", maxWidth: "28rem", wordBreak: "break-word" }}>
+            {String(this.state.error?.message || this.state.error || "")}
+          </p>
+          <button
+            onClick={() => window.location.reload()}
+            style={{
+              background: "#18C964", color: "#0B0D0F", fontWeight: 700,
+              border: "none", borderRadius: "9999px", padding: "0.75rem 1.5rem", cursor: "pointer"
+            }}
+          >
+            Reload
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <ErrorBoundary>
+    <App />
+  </ErrorBoundary>
+);
 </script>
 </body>
 </html>
