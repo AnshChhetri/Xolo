@@ -143,6 +143,34 @@
     * { animation: none !important; transition: none !important; }
   }
 </style>
+<script type="module">
+  // Firebase's browser-module CDN setup keeps this game deployable as one HTML file.
+  import { initializeApp, getApps } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
+  import { getAuth, onAuthStateChanged, signInAnonymously } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
+  import { getDatabase, ref, set, get, update, push, onValue, onDisconnect, runTransaction, remove, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyCELvkRwkSiX3oiT1U1GZ99yMLUSvJ6L_E",
+    authDomain: "projectfootball-bfe26.firebaseapp.com",
+    databaseURL: "https://projectfootball-bfe26-default-rtdb.firebaseio.com",
+    projectId: "projectfootball-bfe26",
+    storageBucket: "projectfootball-bfe26.firebasestorage.app",
+    messagingSenderId: "244343024164",
+    appId: "1:244343024164:web:a0c7337d42eeb47780c6b1",
+    measurementId: "G-C0F6CZ0339"
+  };
+
+  const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getDatabase(app);
+  window.XOLO_FIREBASE = {
+    auth, db, onAuthStateChanged, signInAnonymously,
+    ref, set, get, update, push, onValue, onDisconnect,
+    runTransaction, remove, serverTimestamp
+  };
+  window.dispatchEvent(new Event("xolo-firebase-ready"));
+</script>
+
 </head>
 <body>
 <div id="root"></div>
@@ -1068,6 +1096,23 @@ function App() {
     } catch (_) {}
   }, [theme]);
 
+  const [firebaseServices, setFirebaseServices] = useState(() => window.XOLO_FIREBASE || null);
+  const [firebaseUser, setFirebaseUser] = useState(null);
+  const [firebaseStatus, setFirebaseStatus] = useState("Connecting to Firebase…");
+  const [firebaseError, setFirebaseError] = useState("");
+  const [roomId, setRoomId] = useState(null);
+  const [roomCode, setRoomCode] = useState("");
+  const [roomHostUid, setRoomHostUid] = useState(null);
+  const [roomMembers, setRoomMembers] = useState({});
+  const [roomMessage, setRoomMessage] = useState("");
+  const [auctionDeadlineAt, setAuctionDeadlineAt] = useState(null);
+  const isRoomHost = !!firebaseUser && !!roomHostUid && firebaseUser.uid === roomHostUid;
+  const firebaseSignInRef = useRef(false);
+  const presenceStopRef = useRef(null);
+  const processedCommandsRef = useRef(new Set());
+  const commandQueueRef = useRef(Promise.resolve());
+  const roomActionsRef = useRef({});
+
   const [inGame, setInGame] = useState(false);
   const [viewAs, setViewAs] = useState(null);
   const [pool, setPool] = useState(PLAYER_POOL);
@@ -1092,11 +1137,200 @@ function App() {
   const [liveMatch, setLiveMatch] = useState(null);
   const [botPaused, setBotPaused] = useState(false);
 
+  useEffect(() => {
+    if (window.XOLO_FIREBASE) setFirebaseServices(window.XOLO_FIREBASE);
+    const ready = () => setFirebaseServices(window.XOLO_FIREBASE || null);
+    window.addEventListener("xolo-firebase-ready", ready);
+    return () => window.removeEventListener("xolo-firebase-ready", ready);
+  }, []);
+
+  useEffect(() => {
+    if (!firebaseServices) return;
+    setFirebaseStatus("Signing in anonymously…");
+    const unsubscribe = firebaseServices.onAuthStateChanged(firebaseServices.auth, user => {
+      if (user) {
+        firebaseSignInRef.current = false;
+        setFirebaseUser(user);
+        setFirebaseStatus("Connected");
+        setFirebaseError("");
+      } else if (!firebaseSignInRef.current) {
+        firebaseSignInRef.current = true;
+        firebaseServices.signInAnonymously(firebaseServices.auth).catch(error => {
+          firebaseSignInRef.current = false;
+          setFirebaseStatus("Auth unavailable");
+          setFirebaseError(error?.message || "Anonymous sign-in failed. Enable it in Firebase Authentication.");
+        });
+      }
+    });
+    return unsubscribe;
+  }, [firebaseServices]);
+
   function addLog(msg) {
     setLog(l => [msg, ...l].slice(0, 30));
   }
 
-  function addManager(rawName) {
+  function buildSharedState() {
+    return JSON.parse(JSON.stringify({
+      version: 1, managers, budgets, squads, pool, current, skipVotes, auctionTimerVotes,
+      auctionDuration, auctionDeadlineAt, bidHistory, log, phase, fixtures,
+      lastSimulatedKeys, leagueTeams, liveMatch, botPaused, defaultBasePrice
+    }));
+  }
+
+  function applySharedState(state) {
+    if (!state) return;
+    setManagers(state.managers || []);
+    setBudgets(state.budgets || {});
+    setSquads(state.squads || {});
+    setPool(Array.isArray(state.pool) ? state.pool : Object.values(state.pool || {}));
+    setCurrent(state.current || null);
+    setSkipVotes(state.skipVotes || []);
+    setAuctionTimerVotes(state.auctionTimerVotes || {});
+    setAuctionDuration(state.auctionDuration ?? null);
+    setAuctionDeadlineAt(state.auctionDeadlineAt ?? null);
+    setBidHistory(state.bidHistory || []);
+    setLog(state.log || []);
+    setPhase(state.phase || "auction");
+    setFixtures(state.fixtures || []);
+    setLastSimulatedKeys(state.lastSimulatedKeys || []);
+    setLeagueTeams(state.leagueTeams || []);
+    setLiveMatch(state.liveMatch || null);
+    setBotPaused(!!state.botPaused);
+    setDefaultBasePriceState(state.defaultBasePrice ?? INITIAL_DEFAULT_BASE);
+  }
+
+  function randomRoomCode() {
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    const bytes = new Uint8Array(6);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, byte => alphabet[byte % alphabet.length]).join("");
+  }
+
+  async function createOnlineRoom() {
+    if (!firebaseServices || !firebaseUser) { setRoomMessage("Firebase is still connecting."); return; }
+    if (roomId) { setRoomMessage("You are already in a room."); return; }
+    if (managers.length > 0) {
+      setRoomMessage("Create the online room before adding local managers, so each manager gets a Firebase identity.");
+      return;
+    }
+    setRoomMessage("");
+    setFirebaseError("");
+    const db = firebaseServices.db;
+    const hostUid = firebaseUser.uid;
+    const newRoomId = firebaseServices.push(firebaseServices.ref(db, "rooms")).key;
+    if (!newRoomId) { setRoomMessage("Could not create a room ID. Please try again."); return; }
+
+    let reservedCode = "";
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const candidate = randomRoomCode();
+      try {
+        const result = await firebaseServices.runTransaction(
+          firebaseServices.ref(db, `roomCodes/${candidate}`),
+          existing => existing === null ? { roomId: newRoomId, hostUid, ready: false } : undefined,
+          { applyLocally: false }
+        );
+        if (result.committed) { reservedCode = candidate; break; }
+      } catch (error) {
+        setRoomMessage(error?.message || "Could not reserve a room code. Check your Realtime Database rules.");
+        return;
+      }
+    }
+    if (!reservedCode) { setRoomMessage("Could not find an unused room code. Please try again."); return; }
+
+    try {
+      const member = { uid: hostUid, name: "", online: true, joinedAt: Date.now() };
+      await firebaseServices.set(firebaseServices.ref(db, `rooms/${newRoomId}`), {
+        meta: { roomId: newRoomId, code: reservedCode, hostUid, createdAt: Date.now(), version: 1 },
+        members: { [hostUid]: member },
+        state: buildSharedState()
+      });
+      await firebaseServices.update(firebaseServices.ref(db, `roomCodes/${reservedCode}`), { ready: true });
+      setRoomId(newRoomId);
+      setRoomCode(reservedCode);
+      setRoomHostUid(hostUid);
+      setRoomMembers({ [hostUid]: member });
+      setViewAs(hostUid);
+      setInGame(true);
+      try { localStorage.setItem("xolo-room-code", reservedCode); } catch (_) {}
+      setRoomMessage("Room ready. Share the code with your managers.");
+    } catch (error) {
+      await firebaseServices.remove(firebaseServices.ref(db, `rooms/${newRoomId}`)).catch(() => {});
+      await firebaseServices.remove(firebaseServices.ref(db, `roomCodes/${reservedCode}`)).catch(() => {});
+      setRoomMessage(error?.message || "Room creation failed. Check your Realtime Database rules.");
+    }
+  }
+
+  async function joinOnlineRoom(rawCode) {
+    if (!firebaseServices || !firebaseUser) { setRoomMessage("Firebase is still connecting."); return; }
+    const code = String(rawCode || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+    if (code.length !== 6) { setRoomMessage("Enter the 6-character room code."); return; }
+    setRoomMessage("");
+    setFirebaseError("");
+    try {
+      const db = firebaseServices.db;
+      const lookup = await firebaseServices.get(firebaseServices.ref(db, `roomCodes/${code}`));
+      const mapping = lookup.val();
+      if (!mapping?.roomId || !mapping?.hostUid) { setRoomMessage("Room not found. Check the code and try again."); return; }
+      if (mapping.ready !== true) { setRoomMessage("That room is still starting. Wait a moment and try again."); return; }
+      const uid = firebaseUser.uid;
+      const member = { uid, name: "", online: true, joinedAt: Date.now() };
+      const memberRef = firebaseServices.ref(db, `rooms/${mapping.roomId}/members/${uid}`);
+      await firebaseServices.set(memberRef, member);
+      const savedSnapshot = await firebaseServices.get(firebaseServices.ref(db, `rooms/${mapping.roomId}/state`));
+      const savedState = savedSnapshot.val();
+      if (savedState) {
+        applySharedState(savedState);
+        const savedManager = (savedState.managers || []).find(manager => manager.id === uid);
+        if (savedManager) await firebaseServices.update(memberRef, { name: savedManager.name, managerId: uid });
+      }
+      setRoomId(mapping.roomId);
+      setRoomCode(code);
+      setRoomHostUid(mapping.hostUid);
+      setRoomMembers({ [uid]: member });
+      setViewAs(uid);
+      setInGame(true);
+      try { localStorage.setItem("xolo-room-code", code); } catch (_) {}
+      setRoomMessage(savedState?.managers?.some(manager => manager.id === uid)
+        ? "Room restored. You are back in the auction."
+        : "Joined room. Enter your manager name to join the auction.");
+    } catch (error) {
+      setRoomMessage(error?.message || "Could not join room. Check the room code and database rules.");
+    }
+  }
+
+  async function leaveOnlineRoom() {
+    if (!roomId || !firebaseUser || isRoomHost) return;
+    const api = firebaseServices;
+    const memberRef = api.ref(api.db, `rooms/${roomId}/members/${firebaseUser.uid}`);
+    try { await api.onDisconnect(memberRef).cancel(); } catch (_) {}
+    await api.remove(memberRef).catch(() => {});
+    if (presenceStopRef.current) { presenceStopRef.current(); presenceStopRef.current = null; }
+    setRoomId(null); setRoomCode(""); setRoomHostUid(null); setRoomMembers({});
+    setRoomMessage("");
+    setViewAs(null); setInGame(false);
+    setManagers([]); setBudgets({}); setSquads({}); setPool(PLAYER_POOL); setCurrent(null);
+    setSkipVotes([]); setAuctionTimerVotes({}); setAuctionDuration(null); setAuctionDeadlineAt(null);
+    setBidHistory([]); setLog(["Room created. XOLO Auctioneer Bot is waiting for managers."]);
+    setPhase("auction"); setFixtures([]); setLastSimulatedKeys([]); setLeagueTeams([]); setLiveMatch(null);
+    setBotPaused(false); setDefaultBasePriceState(INITIAL_DEFAULT_BASE);
+    try { localStorage.removeItem("xolo-room-code"); } catch (_) {}
+  }
+
+  async function sendRoomCommand(type, payload = {}) {
+    if (!roomId || !firebaseUser || !firebaseServices) return false;
+    try {
+      const commandRef = firebaseServices.push(firebaseServices.ref(firebaseServices.db, `rooms/${roomId}/commands`));
+      await firebaseServices.set(commandRef, {
+        uid: firebaseUser.uid, type, payload: JSON.parse(JSON.stringify(payload)), createdAt: firebaseServices.serverTimestamp()
+      });
+      return true;
+    } catch (error) {
+      setRoomMessage(error?.message || "Could not send that action to the room host.");
+      return false;
+    }
+  }
+
+  function addManager(rawName, requestedId = null) {
     const name = (rawName || "").trim().slice(0, MAX_NAME_LENGTH);
     if (!name) {
       addLog("Enter a name to join as a manager.");
@@ -1110,7 +1344,8 @@ function App() {
       addLog(`"${name}" is already in the auction — try a different name.`);
       return null;
     }
-    const id = makeManagerId();
+    if (requestedId && managers.some(m => m.id === requestedId)) return requestedId;
+    const id = requestedId || makeManagerId();
     const color = MANAGER_COLORS[managers.length % MANAGER_COLORS.length];
     const club = pickNextClub(managers);
     setManagers(list => [...list, { id, name, color, club }]);
@@ -1118,6 +1353,72 @@ function App() {
     setSquads(s => ({ ...s, [id]: [] }));
     addLog(`${name} joined the auction.`);
     return id;
+  }
+
+  function joinAsManager(rawName) {
+    const name = (rawName || "").trim().slice(0, MAX_NAME_LENGTH);
+    if (!roomId) {
+      const id = addManager(name);
+      if (id) setViewAs(id);
+      return id;
+    }
+    if (!firebaseUser || !name) return null;
+    const uid = firebaseUser.uid;
+    setViewAs(uid);
+    if (managers.some(manager => manager.id === uid)) {
+      firebaseServices.update(firebaseServices.ref(firebaseServices.db, `rooms/${roomId}/members/${uid}`), { name, managerId: uid }).catch(() => {});
+      return uid;
+    }
+    firebaseServices.update(firebaseServices.ref(firebaseServices.db, `rooms/${roomId}/members/${uid}`), { name, managerId: uid }).catch(() => {});
+    if (isRoomHost) return addManager(name, uid);
+    sendRoomCommand("join", { name });
+    return uid;
+  }
+
+  function requestRemoveManager(id) {
+    if (roomId && !isRoomHost) { setRoomMessage("Only the room host can remove managers."); return; }
+    removeManager(id);
+  }
+
+  function requestPlaceBid(managerId, amount) {
+    if (!roomId) return placeBid(managerId, amount);
+    if (!firebaseUser) return;
+    if (!isRoomHost) { sendRoomCommand("bid", { amount }); return; }
+    placeBid(firebaseUser.uid, amount);
+  }
+
+  function requestSkipVote(managerId) {
+    if (!roomId) return voteToSkip(managerId);
+    if (!firebaseUser) return;
+    if (!isRoomHost) { sendRoomCommand("skipVote"); return; }
+    voteToSkip(firebaseUser.uid);
+  }
+
+  function requestTimerVote(managerId, seconds) {
+    if (!roomId) return voteAuctionTimer(managerId, seconds);
+    if (!firebaseUser) return;
+    if (!isRoomHost) { sendRoomCommand("timerVote", { seconds }); return; }
+    voteAuctionTimer(firebaseUser.uid, seconds);
+  }
+
+  function requestStartLeague() {
+    if (roomId && !isRoomHost) { sendRoomCommand("startLeague"); return; }
+    startLeague();
+  }
+
+  function requestSimulateAuction() {
+    if (roomId && !isRoomHost) { sendRoomCommand("simulateAuction"); return; }
+    simulateEntireAuction();
+  }
+
+  function requestSimulateMatchday(index) {
+    if (roomId && !isRoomHost) { sendRoomCommand("simulateMatchday", { index }); return; }
+    simulateMatchday(index);
+  }
+
+  function requestSimulateSeason() {
+    if (roomId && !isRoomHost) { sendRoomCommand("simulateSeason"); return; }
+    simulateFullSeason();
   }
 
   function removeManager(id) {
@@ -1172,23 +1473,29 @@ function App() {
   }
 
   useEffect(() => {
+    if (roomId && !isRoomHost) return;
     if (!inGame || phase !== "auction" || botPaused || managers.length === 0 || current || pool.length === 0) return;
     startNextBotAuction();
-  }, [inGame, phase, botPaused, managers.length, current, pool.length]);
+  }, [inGame, roomId, isRoomHost, phase, botPaused, managers.length, current, pool.length]);
 
   useEffect(() => {
-    const isActiveAuction = inGame && phase === "auction" && !botPaused && current?.status === "live" && auctionDuration !== null;
+    const isRoomController = !roomId || isRoomHost;
+    const isActiveAuction = isRoomController && inGame && phase === "auction" && !botPaused && current?.status === "live" && auctionDuration !== null;
     if (!isActiveAuction) {
-      auctionTimerDeadlineRef.current = null;
-      if (!current || current.status !== "live") setAuctionSecondsLeft(null);
+      if (isRoomController) auctionTimerDeadlineRef.current = null;
+      if (isRoomController && (!current || current.status !== "live")) {
+        setAuctionSecondsLeft(null);
+        if (auctionDeadlineAt !== null) setAuctionDeadlineAt(null);
+      }
       return;
     }
 
     const playerId = current.player.id;
     let timer = auctionTimerDeadlineRef.current;
     if (!timer || timer.playerId !== playerId || timer.duration !== auctionDuration) {
-      timer = { playerId, duration: auctionDuration, deadline: Date.now() + auctionDuration * 1000 };
+      timer = { playerId, duration: auctionDuration, deadline: auctionDeadlineAt || Date.now() + auctionDuration * 1000 };
       auctionTimerDeadlineRef.current = timer;
+      if (!auctionDeadlineAt) setAuctionDeadlineAt(timer.deadline);
     }
 
     const updateRemaining = () => {
@@ -1205,7 +1512,15 @@ function App() {
         auctionBotTimeoutRef.current = null;
       }
     };
-  }, [inGame, phase, botPaused, current?.player?.id, current?.bid, current?.status, auctionDuration]);
+  }, [inGame, roomId, isRoomHost, phase, botPaused, current?.player?.id, current?.bid, current?.status, auctionDuration]);
+
+  useEffect(() => {
+    if (!roomId || isRoomHost || !current || current.status !== "live" || auctionDuration === null || !auctionDeadlineAt) return;
+    const updateRemaining = () => setAuctionSecondsLeft(Math.max(0, Math.ceil((auctionDeadlineAt - Date.now()) / 1000)));
+    updateRemaining();
+    const interval = setInterval(updateRemaining, 250);
+    return () => clearInterval(interval);
+  }, [roomId, isRoomHost, current?.player?.id, current?.status, auctionDuration, auctionDeadlineAt]);
 
   useEffect(() => {
     return () => {
@@ -1476,7 +1791,94 @@ function App() {
     addLog("Rest of the season simulated.");
   }
 
+  useEffect(() => {
+    if (!roomId || !firebaseServices) return;
+    const db = firebaseServices.db;
+    const unsubMembers = firebaseServices.onValue(firebaseServices.ref(db, `rooms/${roomId}/members`), snapshot => {
+      setRoomMembers(snapshot.val() || {});
+    }, error => setRoomMessage(error?.message || "Room membership listener failed."));
+    let unsubState = null;
+    if (!isRoomHost) {
+      unsubState = firebaseServices.onValue(firebaseServices.ref(db, `rooms/${roomId}/state`), snapshot => {
+        applySharedState(snapshot.val());
+      }, error => setRoomMessage(error?.message || "Could not read the room game state. Check database rules."));
+    }
+    return () => { unsubMembers(); if (unsubState) unsubState(); };
+  }, [roomId, isRoomHost, firebaseServices]);
+
+  useEffect(() => {
+    if (!roomId || !firebaseUser || !firebaseServices) return;
+    const memberRef = firebaseServices.ref(firebaseServices.db, `rooms/${roomId}/members/${firebaseUser.uid}`);
+    const unsubscribe = firebaseServices.onValue(firebaseServices.ref(firebaseServices.db, ".info/connected"), snapshot => {
+      if (snapshot.val() !== true) return;
+      firebaseServices.onDisconnect(memberRef).update({ online: false, lastSeenAt: firebaseServices.serverTimestamp() })
+        .then(() => firebaseServices.update(memberRef, { online: true }))
+        .catch(error => setRoomMessage(error?.message || "Could not set room presence."));
+    });
+    presenceStopRef.current = unsubscribe;
+    return () => {
+      unsubscribe();
+      if (presenceStopRef.current === unsubscribe) presenceStopRef.current = null;
+    };
+  }, [roomId, firebaseUser?.uid, firebaseServices]);
+
+  useEffect(() => {
+    processedCommandsRef.current = new Set();
+    commandQueueRef.current = Promise.resolve();
+  }, [roomId]);
+
+  useEffect(() => {
+    if (!roomId || !isRoomHost || !firebaseServices) return;
+    const commandsRef = firebaseServices.ref(firebaseServices.db, `rooms/${roomId}/commands`);
+    const unsubscribe = firebaseServices.onValue(commandsRef, snapshot => {
+      const commands = snapshot.val() || {};
+      Object.entries(commands).forEach(([commandId, command]) => {
+        if (processedCommandsRef.current.has(commandId)) return;
+        processedCommandsRef.current.add(commandId);
+        commandQueueRef.current = commandQueueRef.current.then(async () => {
+          try {
+            const actions = roomActionsRef.current;
+            const payload = command.payload || {};
+            if (command.type !== "join" && command.type !== "removeManager" && !actions.isManager(command.uid)) return;
+            if (command.type === "join" && typeof payload.name === "string") actions.addManager(payload.name, command.uid);
+            else if (command.type === "bid") actions.placeBid(command.uid, payload.amount);
+            else if (command.type === "skipVote") actions.voteToSkip(command.uid);
+            else if (command.type === "timerVote") actions.voteAuctionTimer(command.uid, Number(payload.seconds));
+            else if (command.type === "startLeague") actions.startLeague();
+            else if (command.type === "simulateAuction") actions.simulateEntireAuction();
+            else if (command.type === "simulateMatchday") actions.simulateMatchday(Number(payload.index));
+            else if (command.type === "simulateSeason") actions.simulateFullSeason();
+            else if (command.type === "removeManager" && command.uid === roomHostUid) actions.removeManager(payload.managerId);
+            await new Promise(resolve => setTimeout(resolve, 20));
+          } catch (error) {
+            setRoomMessage(error?.message || "The room host could not process an action.");
+          } finally {
+            await firebaseServices.remove(firebaseServices.ref(firebaseServices.db, `rooms/${roomId}/commands/${commandId}`)).catch(() => {});
+          }
+        });
+      });
+    }, error => setRoomMessage(error?.message || "Could not receive room actions."));
+    return unsubscribe;
+  }, [roomId, isRoomHost, roomHostUid, firebaseServices]);
+
+  useEffect(() => {
+    if (!roomId || !isRoomHost || !firebaseServices) return;
+    const state = buildSharedState();
+    firebaseServices.set(firebaseServices.ref(firebaseServices.db, `rooms/${roomId}/state`), state)
+      .catch(error => setRoomMessage(error?.message || "Could not sync the game state."));
+  }, [roomId, isRoomHost, firebaseServices, managers, budgets, squads, pool, current, skipVotes, auctionTimerVotes, auctionDuration, auctionDeadlineAt, bidHistory, log, phase, fixtures, lastSimulatedKeys, leagueTeams, liveMatch, botPaused, defaultBasePrice]);
+
   const humanManagers = managers.filter(manager => !manager.bot);
+  roomActionsRef.current = {
+    addManager, placeBid, voteToSkip, voteAuctionTimer, removeManager,
+    startLeague, simulateEntireAuction, simulateMatchday, simulateFullSeason,
+    isManager: id => managers.some(manager => manager.id === id && !manager.bot)
+  };
+
+  function requestRemoveManagerFromUI(id) {
+    if (roomId && !isRoomHost) { setRoomMessage("Only the room host can remove managers."); return; }
+    removeManager(id);
+  }
 
   if (!inGame) {
     return <WelcomePage onPlay={() => setInGame(true)} theme={theme} onToggleTheme={() => setTheme(current => current === "dark" ? "light" : "dark")} />;
@@ -1484,34 +1886,34 @@ function App() {
 
   return (
     <div className="min-h-screen flex flex-col">
-      <TopBar viewAs={viewAs} setViewAs={setViewAs} poolCount={pool.length} managers={managers} addManager={addManager} phase={phase} theme={theme} onToggleTheme={() => setTheme(current => current === "dark" ? "light" : "dark")} />
+      <TopBar viewAs={viewAs} setViewAs={setViewAs} poolCount={pool.length} managers={managers} addManager={joinAsManager} phase={phase} theme={theme} onToggleTheme={() => setTheme(current => current === "dark" ? "light" : "dark")} firebaseStatus={firebaseStatus} firebaseError={firebaseError} roomCode={roomCode} roomMembers={roomMembers} isRoomHost={isRoomHost} roomMessage={roomMessage} onCreateRoom={createOnlineRoom} onJoinRoom={joinOnlineRoom} onLeaveRoom={leaveOnlineRoom} />
       {phase === "league" ? (
         <LeagueView
           teams={leagueTeams}
           fixtures={fixtures}
-          simulateMatchday={simulateMatchday}
-          simulateFullSeason={simulateFullSeason}
+          simulateMatchday={requestSimulateMatchday}
+          simulateFullSeason={requestSimulateSeason}
           viewAs={viewAs}
           lastSimulatedKeys={lastSimulatedKeys}
           liveMatch={liveMatch}
         />
       ) : (
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-[280px_1fr_300px] gap-6 p-6 max-w-[1400px] w-full mx-auto">
-        <LeftPanel budgets={budgets} squads={squads} managers={managers} removeManager={removeManager} />
+        <LeftPanel budgets={budgets} squads={squads} managers={managers} removeManager={requestRemoveManagerFromUI} canRemoveManagers={!roomId || isRoomHost} />
         <CenterStage
           current={current}
           bidHistory={bidHistory}
           budgets={budgets}
           viewAs={viewAs}
-          placeBid={placeBid}
+          placeBid={requestPlaceBid}
           managers={managers}
           humanManagers={humanManagers}
           skipVotes={skipVotes}
-          voteToSkip={voteToSkip}
+          voteToSkip={requestSkipVote}
           auctionTimerVotes={auctionTimerVotes}
           auctionDuration={auctionDuration}
           auctionSecondsLeft={auctionSecondsLeft}
-          voteAuctionTimer={voteAuctionTimer}
+          voteAuctionTimer={requestTimerVote}
         />
         <RightPanel
           viewAs={viewAs}
@@ -1520,16 +1922,16 @@ function App() {
           log={log}
           budgets={budgets}
           squads={squads}
-          placeBid={placeBid}
+          placeBid={requestPlaceBid}
           managers={managers}
           phase={phase}
-          startLeague={startLeague}
-          simulateEntireAuction={simulateEntireAuction}
+          startLeague={requestStartLeague}
+          simulateEntireAuction={requestSimulateAuction}
         />
       </div>
       )}
       <footer className="text-center text-xs py-4 border-t" style={{ borderColor: "var(--border)", color: "var(--text-muted)" }}>
-        XOLO · Football Auction & League Experience
+        XOLO · Football Auction & League Experience · Firebase multiplayer
       </footer>
     </div>
   );
@@ -1553,8 +1955,11 @@ function ThemeToggle({ theme, onToggle }) {
 }
 
 // ---------- Top bar ----------
-function TopBar({ viewAs, setViewAs, poolCount, managers, addManager, phase, theme, onToggleTheme }) {
+function TopBar({ viewAs, setViewAs, poolCount, managers, addManager, phase, theme, onToggleTheme, firebaseStatus, firebaseError, roomCode, roomMembers, isRoomHost, roomMessage, onCreateRoom, onJoinRoom, onLeaveRoom }) {
   const [joinName, setJoinName] = useState("");
+  const [roomCodeInput, setRoomCodeInput] = useState(() => {
+    try { return localStorage.getItem("xolo-room-code") || ""; } catch (_) { return ""; }
+  });
 
   function handleJoin(e) {
     e.preventDefault();
@@ -1563,6 +1968,11 @@ function TopBar({ viewAs, setViewAs, poolCount, managers, addManager, phase, the
       setViewAs(id);
       setJoinName("");
     }
+  }
+
+  function handleRoomJoin(e) {
+    e.preventDefault();
+    onJoinRoom(roomCodeInput);
   }
 
   return (
@@ -1579,7 +1989,30 @@ function TopBar({ viewAs, setViewAs, poolCount, managers, addManager, phase, the
           <span className="hidden sm:inline text-xs font-medium" style={{ color: "var(--text-muted)" }}>{poolCount} players left</span>
         </div>
         <div className="flex flex-wrap items-center gap-3 text-sm">
-          {phase !== "league" && (
+          {roomCode ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-bold px-3 py-2 rounded-full" style={{ background: "var(--surface-2)", border: "1px solid var(--border)", color: "var(--primary)" }}>
+                ROOM {roomCode} · {isRoomHost ? "HOST" : "ONLINE"}
+              </span>
+              <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                {Object.values(roomMembers || {}).filter(member => member.online).length} connected · host browser must stay open
+              </span>
+              {!isRoomHost && <button type="button" onClick={onLeaveRoom} className="btn-pill px-3 py-2 text-xs" style={{ background: "var(--surface-2)", border: "1px solid var(--border)", color: "var(--text)" }}>Leave room</button>}
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <form onSubmit={handleRoomJoin} className="flex items-center gap-2">
+                <label htmlFor="room-code-input" className="sr-only">Room code</label>
+                <input id="room-code-input" value={roomCodeInput} onChange={event => setRoomCodeInput(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6))} placeholder="Room code" maxLength={6} className="w-28 rounded-full px-3 py-2 text-xs uppercase" style={{ background: "var(--surface-2)", border: "1px solid var(--border)", color: "var(--text)" }} />
+                <button type="submit" disabled={roomCodeInput.length !== 6 || firebaseStatus !== "Connected"} className="btn-pill px-3 py-2 text-xs disabled:opacity-40" style={{ background: "var(--surface-2)", border: "1px solid var(--border)", color: "var(--text)" }}>Join room</button>
+              </form>
+              <button type="button" onClick={onCreateRoom} disabled={firebaseStatus !== "Connected"} className="btn-pill px-3 py-2 text-xs disabled:opacity-40" style={{ background: "var(--primary)", color: "#0B0D0F" }}>Create room</button>
+              <span className="text-[10px]" style={{ color: firebaseStatus === "Connected" ? "var(--text-muted)" : "var(--warning)" }}>{firebaseStatus}</span>
+            </div>
+          )}
+          {roomMessage && <span className="text-[11px]" role="status" style={{ color: "var(--warning)" }}>{roomMessage}</span>}
+          {firebaseError && <span className="text-[11px]" role="alert" style={{ color: "var(--danger)" }}>{firebaseError}</span>}
+          {phase !== "league" && (!roomCode || !managers.some(manager => manager.id === viewAs)) && (
           <form onSubmit={handleJoin} className="flex items-center gap-2">
             <label htmlFor="join-name-input" className="sr-only">Your name</label>
             <input
@@ -1604,7 +2037,9 @@ function TopBar({ viewAs, setViewAs, poolCount, managers, addManager, phase, the
           {viewAs && (
             <label className="flex items-center gap-2 text-xs font-medium" style={{ color: "var(--text-secondary)" }}>
               Playing as
-              {managers.filter(manager => !manager.bot).length > 1 ? (
+              {roomCode ? (
+                <strong style={{ color: "var(--text)" }}>{managers.find(manager => manager.id === viewAs)?.name ?? "Manager"}</strong>
+              ) : managers.filter(manager => !manager.bot).length > 1 ? (
                 <select
                   value={viewAs}
                   onChange={event => setViewAs(event.target.value)}
@@ -1632,7 +2067,7 @@ function TopBar({ viewAs, setViewAs, poolCount, managers, addManager, phase, the
 }
 
 // ---------- Left panel: budgets + squads ----------
-function LeftPanel({ budgets, squads, managers, removeManager }) {
+function LeftPanel({ budgets, squads, managers, removeManager, canRemoveManagers = true }) {
   return (
     <div className="card-soft p-5 space-y-4">
       <h2 className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>Managers</h2>
@@ -1666,7 +2101,7 @@ function LeftPanel({ budgets, squads, managers, removeManager }) {
               <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>No players yet</span>
             )}
           </div>
-          {squads[m.id].length === 0 && (
+          {canRemoveManagers && squads[m.id].length === 0 && (
             <button
               onClick={() => removeManager(m.id)}
               aria-label={`Remove ${m.name} from the auction`}
