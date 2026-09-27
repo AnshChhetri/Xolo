@@ -13,15 +13,16 @@
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
   :root {
-    --pitch: #0f2e1d;
-    --pitch-deep: #0a2116;
-    --panel: #163c27;
-    --panel-line: #24513a;
+    --pitch: #0d2417;
+    --pitch-deep: #081a11;
+    --panel: #11311f;
+    --panel-line: #1f4a31;
     --chalk: #f3f1e7;
-    --gold: #c8992b;
+    --gold: #d4a53a;
+    --gold-deep: #b5872a;
     --bid: #c4432b;
     --bid-alert: #ff7a5c; /* accessible red for text on dark panels — plain --bid text failed WCAG contrast at 2.45:1 */
-    --muted: #9fb8a8;
+    --muted: #8fae9c;
     box-sizing: border-box;
     padding-top: env(safe-area-inset-top, 0px);
     padding-bottom: env(safe-area-inset-bottom, 0px);
@@ -30,11 +31,12 @@
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    background: var(--pitch);
+    background: var(--pitch-deep);
     color: var(--chalk);
     font-family: 'Work Sans', sans-serif;
     min-height: 100%;
     background-image:
+      radial-gradient(ellipse 1200px 600px at 50% -10%, rgba(212,165,58,0.07), transparent 60%),
       repeating-linear-gradient(0deg, rgba(255,255,255,0.02) 0px, rgba(255,255,255,0.02) 1px, transparent 1px, transparent 64px),
       repeating-linear-gradient(90deg, rgba(255,255,255,0.02) 0px, rgba(255,255,255,0.02) 1px, transparent 1px, transparent 64px);
   }
@@ -48,6 +50,35 @@
   .sr-only {
     position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
     overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+  }
+  /* ---- 7a0-inspired shared bits: pill buttons + jersey-number badges ---- */
+  .btn-pill {
+    border-radius: 999px !important;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    transition: transform 0.12s ease, filter 0.12s ease;
+  }
+  .btn-pill:not(:disabled):hover { filter: brightness(1.08); transform: translateY(-1px); }
+  .btn-pill:not(:disabled):active { transform: translateY(0); }
+  .jersey-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 999px;
+    background: var(--gold);
+    color: var(--pitch-deep);
+    font-family: 'Teko', sans-serif;
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1;
+  }
+  .card-soft {
+    background: var(--panel);
+    border: 1px solid var(--panel-line);
+    border-radius: 0.9rem;
   }
 </style>
 </head>
@@ -270,8 +301,9 @@ function managerDisplayName(manager) {
 const START_BUDGET = 100; // Cr
 const SQUAD_SIZE = 11;
 const BID_STEP = 1;
-const TIMER_SECONDS = 15;
-const INITIAL_DEFAULT_BASE = 10; // Cr — auctioneer can change this at setup and any time after
+const INITIAL_DEFAULT_BASE = 10; // Cr — fallback used by fast simulation/backfill
+const AUCTION_BOT_SETTLE_MS = 3200; // hidden inactivity window; no visible countdown
+const AUCTION_BOT_TRANSITION_MS = 700; // short sold/unsold transition before next player
 
 function crFmt(n) {
   return `₹${n.toLocaleString("en-IN")} Cr`;
@@ -296,6 +328,34 @@ function positionNeedFactor(squad, pos) {
   });
   if (missingOther >= slots) return 0;
   return 0.35;
+}
+
+function generateAuctionPrice(player, { managers = [], budgets = {}, squads = {}, poolLength = PLAYER_POOL.length } = {}) {
+  // The Auctioneer Bot uses player quality + position value + current room demand,
+  // with controlled randomness so similar players do not always open at the same price.
+  const ratingValue = Math.max(0, (player.rating - 60) * 0.28);
+  const positionValue = {
+    GK: 0.6, CB: 1.1, LB: 0.9, RB: 0.9, CDM: 1.2, CM: 1.3,
+    CAM: 1.7, LW: 1.8, RW: 1.8, ST: 2.2,
+  }[player.pos] || 1;
+
+  let demand = 0;
+  managers.forEach(m => {
+    const squad = squads[m.id] || [];
+    const remainingBudget = Number(budgets[m.id] || 0);
+    if (remainingBudget > 8 && squad.length < SQUAD_SIZE) {
+      demand += positionNeedFactor(squad, player.pos);
+    }
+  });
+  const demandValue = Math.min(3.5, demand / Math.max(1, managers.length));
+
+  // Slightly lower the average opening price later in the auction as budgets tighten.
+  const stageFactor = poolLength <= 30 ? 0.88 : poolLength <= 70 ? 0.95 : 1;
+  const quality = 2.5 + ratingValue + positionValue + demandValue;
+  const randomFactor = 0.78 + Math.random() * 0.44;
+  const raw = quality * stageFactor * randomFactor;
+
+  return Math.max(1, Math.min(24, Math.round(raw)));
 }
 
 function cpuMaxBid(player, base, budget, squad, remainingPool) {
@@ -604,6 +664,187 @@ function isRealFixture(f) {
   return f && f.home !== BYE_ID && f.away !== BYE_ID;
 }
 
+// How likely each position is to be the scorer of a given goal — attackers far more likely
+// than defenders, defenders more likely than a goalkeeper (own-goal-style rarity for GKs).
+const GOAL_WEIGHT_BY_POS = { ST: 5, LW: 4, RW: 4, CAM: 4, CM: 2.2, CDM: 1.2, LB: 0.7, RB: 0.7, CB: 0.5, GK: 0.05 };
+
+// Player-of-the-Season scoring, loosely modeled on classic fantasy football points: goals from
+// deeper positions are worth more (rarer), clean sheets only count for the back line + keeper.
+const GOAL_POINTS_BY_POS = { GK: 10, CB: 6, LB: 6, RB: 6, CDM: 5, CM: 5, CAM: 4, LW: 4, RW: 4, ST: 4 };
+const CLEANSHEET_POINTS_BY_POS = { GK: 6, CB: 4, LB: 4, RB: 4, CDM: 1 };
+const CLEANSHEET_POSITIONS = ["GK", "CB", "LB", "RB"];
+
+function pickScorer(squad) {
+  const pool = (squad || []).filter(p => p && p.pos);
+  if (pool.length === 0) return null;
+  const weighted = pool.map(p => ({
+    player: p,
+    weight: (GOAL_WEIGHT_BY_POS[p.pos] ?? 1) * Math.max(1, (Number(p.rating) || 60) - 50),
+  }));
+  const total = weighted.reduce((sum, w) => sum + w.weight, 0);
+  if (total <= 0) return pool[0];
+  let roll = Math.random() * total;
+  for (const w of weighted) {
+    roll -= w.weight;
+    if (roll <= 0) return w.player;
+  }
+  return weighted[weighted.length - 1].player;
+}
+
+// Combines a season's worth of played fixtures into per-player goal/clean-sheet/points totals,
+// then derives the three end-of-season awards from them.
+function computeSeasonAwards(teams, fixtures) {
+  const stats = {};
+  const byTeamId = Object.fromEntries(teams.map(t => [t.id, t]));
+
+  function statRow(player, teamId) {
+    if (!stats[player.id]) {
+      const team = byTeamId[teamId];
+      stats[player.id] = {
+        id: player.id,
+        name: player.name,
+        pos: player.pos,
+        teamId,
+        teamName: team ? team.club : teamId,
+        goals: 0,
+        cleanSheets: 0,
+        points: 0,
+      };
+    }
+    return stats[player.id];
+  }
+
+  (fixtures || []).forEach(matchday => {
+    (matchday || []).forEach(f => {
+      if (!isRealFixture(f) || !f.played) return;
+      (f.homeScorers || []).forEach(s => { statRow(s, f.home).goals += 1; });
+      (f.awayScorers || []).forEach(s => { statRow(s, f.away).goals += 1; });
+
+      if (f.awayGoals === 0) {
+        const homeTeam = byTeamId[f.home];
+        (homeTeam?.squad || []).forEach(p => {
+          if (CLEANSHEET_POSITIONS.includes(p.pos)) statRow(p, f.home).cleanSheets += 1;
+        });
+      }
+      if (f.homeGoals === 0) {
+        const awayTeam = byTeamId[f.away];
+        (awayTeam?.squad || []).forEach(p => {
+          if (CLEANSHEET_POSITIONS.includes(p.pos)) statRow(p, f.away).cleanSheets += 1;
+        });
+      }
+    });
+  });
+
+  const all = Object.values(stats).map(row => {
+    const goalPts = GOAL_POINTS_BY_POS[row.pos] ?? 4;
+    const csPts = CLEANSHEET_POINTS_BY_POS[row.pos] ?? 0;
+    return { ...row, points: row.goals * goalPts + row.cleanSheets * csPts };
+  });
+
+  const topScorers = all.filter(r => r.goals > 0).sort((a, b) => b.goals - a.goals || a.name.localeCompare(b.name));
+  const topGloves = all.filter(r => r.pos === "GK" && r.cleanSheets > 0).sort((a, b) => b.cleanSheets - a.cleanSheets || a.name.localeCompare(b.name));
+  const topPerformers = all.slice().sort((a, b) => b.points - a.points || a.name.localeCompare(b.name));
+
+  return {
+    topScorers,
+    topGloves,
+    topPerformers,
+    goldenBoot: topScorers[0] || null,
+    goldenGlove: topGloves[0] || null,
+    playerOfSeason: topPerformers[0] || null,
+  };
+}
+
+function summarizeScorers(scorers) {
+  const counts = {};
+  const order = [];
+  (scorers || []).forEach(s => {
+    if (!counts[s.name]) { counts[s.name] = 0; order.push(s.name); }
+    counts[s.name] += 1;
+  });
+  return order.map(name => (counts[name] > 1 ? `${name} x${counts[name]}` : name)).join(", ");
+}
+
+// Same idea as summarizeScorers, but reads minute-stamped events from a match timeline for one
+// side and groups them per player, e.g. "Haaland 23', 67' · Foden 81'".
+function summarizeTimelineSide(timeline, side) {
+  const byName = {};
+  const order = [];
+  (timeline || []).filter(e => e.side === side).forEach(e => {
+    if (!byName[e.scorer.name]) { byName[e.scorer.name] = []; order.push(e.scorer.name); }
+    byName[e.scorer.name].push(e.minute);
+  });
+  return order.map(name => `${name} ${byName[name].map(formatMinute).join(", ")}`).join(" · ");
+}
+
+function formatMinute(m) {
+  return m > 90 ? `90+${m - 90}'` : `${m}'`;
+}
+
+// A goal is a bit more likely in the run-up to half-time and full-time (realistic-ish shape)
+// than perfectly uniform across 90 minutes, plus a small chance of a stoppage-time goal.
+function randomGoalMinute() {
+  if (Math.random() < 0.06) return 90 + Math.ceil(Math.random() * 5); // stoppage time
+  return Math.max(1, Math.ceil(Math.random() * 90));
+}
+
+// Interleaves each side's goalscorers into one chronological, minute-stamped timeline.
+function buildMatchTimeline(homeScorers, awayScorers) {
+  const events = [];
+  (homeScorers || []).forEach(s => events.push({ side: "home", scorer: s, minute: randomGoalMinute() }));
+  (awayScorers || []).forEach(s => events.push({ side: "away", scorer: s, minute: randomGoalMinute() }));
+  events.sort((a, b) => a.minute - b.minute);
+  return events;
+}
+
+// Flavor-only penalty shootout for a human-vs-human draw — decides bragging rights, not points
+// (league standings still record it as a draw, same as a real Premier League tie).
+function simulatePenaltyShootout(homeSquad, awaySquad) {
+  function takers(squad) {
+    const outfield = (squad || []).filter(p => p.pos !== "GK");
+    const pool = outfield.length > 0 ? outfield : (squad || []);
+    const sorted = [...pool].sort((a, b) => (Number(b.rating) || 60) - (Number(a.rating) || 60));
+    const list = [];
+    for (let i = 0; i < 5; i++) list.push(sorted[i % Math.max(1, sorted.length)] || { name: "Player", rating: 65 });
+    return list;
+  }
+  function scoreProb(rating) {
+    return Math.min(0.92, Math.max(0.55, (Number(rating) || 65) / 100 + 0.15));
+  }
+  const homeTakers = takers(homeSquad);
+  const awayTakers = takers(awaySquad);
+  let homeScore = 0, awayScore = 0;
+  const rounds = [];
+  for (let i = 0; i < 5; i++) {
+    const h = homeTakers[i];
+    const hScored = Math.random() < scoreProb(h.rating);
+    if (hScored) homeScore++;
+    rounds.push({ side: "home", name: h.name, scored: hScored });
+
+    const a = awayTakers[i];
+    const aScored = Math.random() < scoreProb(a.rating);
+    if (aScored) awayScore++;
+    rounds.push({ side: "away", name: a.name, scored: aScored });
+  }
+  let sdCount = 0;
+  while (homeScore === awayScore && sdCount < 10) {
+    const h = homeTakers[sdCount % homeTakers.length];
+    const a = awayTakers[sdCount % awayTakers.length];
+    const hScored = Math.random() < scoreProb(h.rating);
+    const aScored = Math.random() < scoreProb(a.rating);
+    if (hScored) homeScore++;
+    if (aScored) awayScore++;
+    rounds.push({ side: "home", name: h.name, scored: hScored, suddenDeath: true });
+    rounds.push({ side: "away", name: a.name, scored: aScored, suddenDeath: true });
+    sdCount++;
+  }
+  if (homeScore === awayScore) {
+    // Vanishingly unlikely after 10 sudden-death rounds — force a decision rather than looping forever.
+    if (Math.random() < 0.5) homeScore++; else awayScore++;
+  }
+  return { homeScore, awayScore, winnerSide: homeScore > awayScore ? "home" : "away", rounds };
+}
+
 function computeStandings(teams, fixtures) {
   const rows = {};
   teams.forEach(t => {
@@ -664,47 +905,62 @@ function fixtureKey(matchdayIndex, f) {
   return `${matchdayIndex}:${f.home}:${f.away}`;
 }
 
-function playMatchday(matchdays, index, squadsByManager) {
+// teamsById: map of team id -> { squad, managerId, isCpu, ... } (see buildLeagueTeams). Needed
+// (rather than just squads) so we can tell a genuine human-vs-human fixture apart from any
+// match involving a CPU side — that distinction drives the slow live-ticker animation and the
+// penalty-shootout flavor in the UI layer.
+function playMatchday(matchdays, index, teamsById) {
   return matchdays.map((matchday, i) => {
     if (i !== index) return matchday;
     return matchday.map(f => {
       if (f.played || !isRealFixture(f)) return f;
+      const homeTeam = teamsById[f.home] || {};
+      const awayTeam = teamsById[f.away] || {};
+      const homeSquad = homeTeam.squad || [];
+      const awaySquad = awayTeam.squad || [];
       const { homeGoals, awayGoals } = simulateScore(
-        averageRating(squadsByManager[f.home]),
-        averageRating(squadsByManager[f.away])
+        averageRating(homeSquad),
+        averageRating(awaySquad)
       );
-      return { ...f, played: true, homeGoals, awayGoals };
+      const homeScorers = [];
+      for (let g = 0; g < homeGoals; g++) {
+        const scorer = pickScorer(homeSquad);
+        if (scorer) homeScorers.push({ id: scorer.id, name: scorer.name, pos: scorer.pos });
+      }
+      const awayScorers = [];
+      for (let g = 0; g < awayGoals; g++) {
+        const scorer = pickScorer(awaySquad);
+        if (scorer) awayScorers.push({ id: scorer.id, name: scorer.name, pos: scorer.pos });
+      }
+      const timeline = buildMatchTimeline(homeScorers, awayScorers);
+      const isPvP = !!homeTeam.managerId && !homeTeam.isCpu && !!awayTeam.managerId && !awayTeam.isCpu;
+      const penalties = (isPvP && homeGoals === awayGoals)
+        ? simulatePenaltyShootout(homeSquad, awaySquad)
+        : null;
+      return { ...f, played: true, homeGoals, awayGoals, homeScorers, awayScorers, timeline, isPvP, penalties };
     });
   });
 }
 
 // ---------- Root ----------
 function App() {
-  const [viewAs, setViewAs] = useState("auctioneer"); // "auctioneer" | manager id
+  const [viewAs, setViewAs] = useState(null); // manager id only — Auctioneer is always the bot
   const [pool, setPool] = useState(PLAYER_POOL);
   const [defaultBasePrice, setDefaultBasePriceState] = useState(INITIAL_DEFAULT_BASE);
   const [current, setCurrent] = useState(null); // { player, base, bid, bidder, status: 'idle'|'live'|'sold'|'unsold' }
-  const [timeLeft, setTimeLeft] = useState(TIMER_SECONDS);
-  const [running, setRunning] = useState(false);
   const [managers, setManagers] = useState([]); // { id, name, color }
   const [budgets, setBudgets] = useState({});
   const [squads, setSquads] = useState({});
   const [bidHistory, setBidHistory] = useState([]);
-  const [log, setLog] = useState(["Room created. Waiting for auctioneer to select a player."]);
+  const [log, setLog] = useState(["Room created. XOLO Auctioneer Bot is waiting for managers."]);
+  const auctionBotTimeoutRef = useRef(null);
+  const auctionTransitionTimeoutRef = useRef(null);
   const [phase, setPhase] = useState("auction");
   const [fixtures, setFixtures] = useState([]);
   const [lastSimulatedKeys, setLastSimulatedKeys] = useState([]);
   const [leagueTeams, setLeagueTeams] = useState([]); // all 20 PL clubs — drafted ones use the manager's squad, the rest are CPU-only
-  const timerRef = useRef(null);
-
-  useEffect(() => {
-    if (running && timeLeft > 0) {
-      timerRef.current = setTimeout(() => setTimeLeft(t => t - 1), 1000);
-    } else if (running && timeLeft === 0) {
-      finishAuction();
-    }
-    return () => clearTimeout(timerRef.current);
-  }, [running, timeLeft]);
+  const [liveMatch, setLiveMatch] = useState(null); // in-progress animated ticker for a human-vs-human match
+  const [botPaused, setBotPaused] = useState(false);
 
   function addLog(msg) {
     setLog(l => [msg, ...l].slice(0, 30));
@@ -756,65 +1012,54 @@ function App() {
       delete rest[id];
       return rest;
     });
-    if (viewAs === id) setViewAs("auctioneer");
+    if (viewAs === id) setViewAs(managers.find(mm => mm.id !== id)?.id ?? null);
     addLog(`${m.name} left the auction.`);
   }
 
-  function selectPlayer(player) {
-    if (running) return;
-    setCurrent({ player, base: defaultBasePrice, bid: defaultBasePrice, bidder: null, status: "idle" });
-    setTimeLeft(TIMER_SECONDS);
+  function scheduleAuctionBot(ms, callback) {
+    if (auctionBotTimeoutRef.current) clearTimeout(auctionBotTimeoutRef.current);
+    auctionBotTimeoutRef.current = setTimeout(() => {
+      auctionBotTimeoutRef.current = null;
+      callback();
+    }, ms);
+  }
+
+  function startNextBotAuction() {
+    if (phase !== "auction" || managers.length === 0 || pool.length === 0 || current) return;
+
+    const player = pool[0];
+    const openingPrice = generateAuctionPrice(player, { managers, budgets, squads, poolLength: pool.length });
+    setCurrent({ player, base: openingPrice, bid: openingPrice, bidder: null, status: "live" });
     setBidHistory([]);
-    addLog(`Auctioneer selected ${player.name}. Base price set to ${crFmt(defaultBasePrice)} (default — adjustable before the auction starts).`);
+    addLog(`XOLO Auctioneer Bot opens ${player.name} at ${crFmt(openingPrice)}.`);
   }
 
-  function setDefaultBasePrice(amount) {
-    const n = Number(amount);
-    if (!Number.isFinite(n) || n <= 0) {
-      addLog("Enter a default base price greater than 0.");
-      return;
-    }
-    setDefaultBasePriceState(n);
-    addLog(`Default base price set to ${crFmt(n)}. Applies to players selected from now on.`);
-  }
+  useEffect(() => {
+    if (phase !== "auction" || botPaused || managers.length === 0 || current || pool.length === 0) return;
+    startNextBotAuction();
+  }, [phase, botPaused, managers.length, current, pool.length]);
 
-  function updateBasePrice(amount) {
-    if (!current || current.status !== "idle") return; // only editable before the auction goes live
-    const n = Number(amount);
-    if (!Number.isFinite(n) || n <= 0) {
-      addLog("Enter a base price greater than 0.");
-      return;
-    }
-    setCurrent(c => ({ ...c, base: n, bid: n }));
-    addLog(`Base price for ${current.player.name} overridden to ${crFmt(n)}.`);
-  }
+  useEffect(() => {
+    if (phase !== "auction" || botPaused || !current || current.status !== "live") return;
+    scheduleAuctionBot(AUCTION_BOT_SETTLE_MS, () => finishAuction());
+    return () => {
+      if (auctionBotTimeoutRef.current) {
+        clearTimeout(auctionBotTimeoutRef.current);
+        auctionBotTimeoutRef.current = null;
+      }
+    };
+  }, [phase, botPaused, current?.player?.id, current?.bid, current?.status]);
 
-  function startAuction() {
-    if (!current) return;
-    if (managers.length === 0) {
-      addLog("Add at least one manager before starting the auction.");
-      return;
-    }
-    setRunning(true);
-    setCurrent(c => ({ ...c, status: "live" }));
-    addLog(`Auction started for ${current.player.name}.`);
-  }
-
-  function pauseAuction() {
-    setRunning(false);
-    addLog("Auction paused by auctioneer.");
-  }
-
-  function resumeAuction() {
-    if (!current) return;
-    setRunning(true);
-    addLog("Auction resumed.");
-  }
+  useEffect(() => {
+    return () => {
+      if (auctionBotTimeoutRef.current) clearTimeout(auctionBotTimeoutRef.current);
+      if (auctionTransitionTimeoutRef.current) clearTimeout(auctionTransitionTimeoutRef.current);
+    };
+  }, []);
 
   function placeBid(managerId, amount) {
     if (!current || current.status !== "live") return;
-    // If the auctioneer doesn't specify an amount, fall back to the standard +1 step
-    // (used by the manager quick-bid button). Otherwise the auctioneer's own figure wins.
+    // Managers can either submit an explicit amount or use the standard +1 bid step.
     const bidAmount = amount !== undefined && amount !== null && amount !== ""
       ? Number(amount)
       : current.bid + BID_STEP;
@@ -833,8 +1078,8 @@ function App() {
     }
     setCurrent(c => ({ ...c, bid: bidAmount, bidder: managerId }));
     setBidHistory(h => [{ managerId, amount: bidAmount }, ...h]);
-    setTimeLeft(TIMER_SECONDS); // reset timer on new bid, like a live auction
     addLog(`${label(managerId)} bids ${crFmt(bidAmount)}.`);
+
   }
 
   function label(id) {
@@ -842,30 +1087,44 @@ function App() {
   }
 
   function finishAuction() {
-    setRunning(false);
-    if (!current) return;
+    if (!current || current.status !== "live") return;
+    if (auctionBotTimeoutRef.current) {
+      clearTimeout(auctionBotTimeoutRef.current);
+      auctionBotTimeoutRef.current = null;
+    }
+
     if (current.bidder) {
       const mid = current.bidder;
+      const soldPlayer = { ...current.player, price: current.bid };
       setBudgets(b => ({ ...b, [mid]: b[mid] - current.bid }));
-      setSquads(s => ({ ...s, [mid]: [...s[mid], { ...current.player, price: current.bid }] }));
+      setSquads(s => ({ ...s, [mid]: [...s[mid], soldPlayer] }));
       setCurrent(c => ({ ...c, status: "sold" }));
-      addLog(`SOLD — ${current.player.name} to ${label(mid)} for ${crFmt(current.bid)}.`);
       setPool(p => p.filter(pl => pl.id !== current.player.id));
+      addLog(`SOLD — ${current.player.name} to ${label(mid)} for ${crFmt(current.bid)}.`);
     } else {
       setCurrent(c => ({ ...c, status: "unsold" }));
       addLog(`${current.player.name} went UNSOLD — no bids.`);
     }
-  }
 
-  function markSoldNow() {
-    setRunning(false);
-    finishAuction();
+    // Short transition only; there is no visible auction countdown/timer.
+    if (auctionTransitionTimeoutRef.current) clearTimeout(auctionTransitionTimeoutRef.current);
+    auctionTransitionTimeoutRef.current = setTimeout(() => {
+      auctionTransitionTimeoutRef.current = null;
+      setCurrent(null);
+    }, AUCTION_BOT_TRANSITION_MS);
   }
 
   function skipPlayer() {
-    if (!current) return;
-    setRunning(false);
-    addLog(`${current.player.name} skipped by auctioneer.`);
+    if (!current || current.status !== "live") return;
+    if (auctionBotTimeoutRef.current) {
+      clearTimeout(auctionBotTimeoutRef.current);
+      auctionBotTimeoutRef.current = null;
+    }
+    if (auctionTransitionTimeoutRef.current) {
+      clearTimeout(auctionTransitionTimeoutRef.current);
+      auctionTransitionTimeoutRef.current = null;
+    }
+    addLog(`${current.player.name} skipped by Auctioneer Bot.`);
     setCurrent(null);
   }
 
@@ -874,7 +1133,8 @@ function App() {
       addLog("Add yourself as a manager before simulating the auction.");
       return;
     }
-    setRunning(false);
+
+    setBotPaused(true);
 
     // Snapshot the state we'll simulate against. If it's currently a solo (or near-solo) room,
     // top it up with CPU bot managers first so there's real competition for every player.
@@ -924,6 +1184,8 @@ function App() {
     setCurrent(null);
     setBidHistory([]);
     setLog(l => [...[...filled.logs].reverse(), ...[...result.logs].reverse(), ...l].slice(0, 30));
+    // Keep the automatic bot paused after a full fast-forward; the auction has already been resolved.
+    setBotPaused(true);
   }
 
   function startLeague() {
@@ -940,17 +1202,63 @@ function App() {
       : "Premier League started — all 20 clubs are in.");
   }
 
-  function simulateMatchday(index) {
-    const squadsByTeam = Object.fromEntries(leagueTeams.map(t => [t.id, t.squad]));
-    const before = fixtures[index] || [];
-    const keys = before.filter(f => isRealFixture(f) && !f.played).map(f => fixtureKey(index, f));
-    setLastSimulatedKeys(keys);
-    setFixtures(prev => playMatchday(prev, index, squadsByTeam));
+  // Slowly reveals a human-vs-human match's pre-computed timeline event by event (like a live
+  // ticker) before resolving. Everything else (CPU involved anywhere) stays instant — this is
+  // purely a presentation delay, the actual result (f) is already fully decided going in.
+  function animateMatch(f, teamsById) {
+    return new Promise(resolve => {
+      const homeTeam = teamsById[f.home];
+      const awayTeam = teamsById[f.away];
+      setLiveMatch({
+        home: f.home,
+        away: f.away,
+        homeName: clubName(homeTeam),
+        awayName: clubName(awayTeam),
+        homeColor: homeTeam?.color || "var(--chalk)",
+        awayColor: awayTeam?.color || "var(--chalk)",
+        events: [],
+        minute: 0,
+        finished: false,
+        penalties: null,
+      });
+      const timeline = f.timeline || [];
+      const tickDelayMs = 500;
+      let i = 0;
+      const tick = () => {
+        if (i < timeline.length) {
+          const ev = timeline[i];
+          i += 1;
+          setLiveMatch(lm => (lm ? { ...lm, events: [...lm.events, ev], minute: ev.minute } : lm));
+          setTimeout(tick, tickDelayMs);
+        } else {
+          setLiveMatch(lm => (lm ? { ...lm, minute: 90, finished: true, penalties: f.penalties } : lm));
+          setTimeout(resolve, f.penalties ? 1800 : 1100);
+        }
+      };
+      setTimeout(tick, tickDelayMs);
+    });
+  }
+
+  async function simulateMatchday(index) {
+    const teamsById = Object.fromEntries(leagueTeams.map(t => [t.id, t]));
+    const unplayed = (fixtures[index] || []).filter(f => isRealFixture(f) && !f.played);
+    setLastSimulatedKeys(unplayed.map(f => fixtureKey(index, f)));
+
+    const resolvedMatchday = playMatchday(fixtures, index, teamsById)[index];
+    const pvpFixtures = resolvedMatchday.filter(f =>
+      isRealFixture(f) && f.isPvP && unplayed.some(u => u.home === f.home && u.away === f.away)
+    );
+
+    for (const f of pvpFixtures) {
+      await animateMatch(f, teamsById);
+    }
+    setLiveMatch(null);
+    setFixtures(prev => prev.map((md, i) => (i === index ? resolvedMatchday : md)));
     addLog(`Matchday ${index + 1} simulated.`);
   }
 
-  function simulateFullSeason() {
-    const squadsByTeam = Object.fromEntries(leagueTeams.map(t => [t.id, t.squad]));
+  async function simulateFullSeason() {
+    const teamsById = Object.fromEntries(leagueTeams.map(t => [t.id, t]));
     const keys = [];
     fixtures.forEach((matchday, i) => {
       matchday.forEach(f => {
@@ -958,14 +1266,22 @@ function App() {
       });
     });
     setLastSimulatedKeys(keys);
-    setFixtures(prev => {
-      let next = prev;
-      for (let i = 0; i < next.length; i++) {
-        const hadUnplayed = (next[i] || []).some(f => isRealFixture(f) && !f.played);
-        if (hadUnplayed) next = playMatchday(next, i, squadsByTeam);
+
+    let working = fixtures;
+    for (let i = 0; i < working.length; i++) {
+      const unplayed = (working[i] || []).filter(f => isRealFixture(f) && !f.played);
+      if (unplayed.length === 0) continue;
+      const resolvedMatchday = playMatchday(working, i, teamsById)[i];
+      const pvpFixtures = resolvedMatchday.filter(f =>
+        isRealFixture(f) && f.isPvP && unplayed.some(u => u.home === f.home && u.away === f.away)
+      );
+      for (const f of pvpFixtures) {
+        await animateMatch(f, teamsById);
       }
-      return next;
-    });
+      working = working.map((md, idx) => (idx === i ? resolvedMatchday : md));
+      setFixtures(working);
+    }
+    setLiveMatch(null);
     addLog("Rest of the season simulated.");
   }
 
@@ -980,14 +1296,13 @@ function App() {
           simulateFullSeason={simulateFullSeason}
           viewAs={viewAs}
           lastSimulatedKeys={lastSimulatedKeys}
+          liveMatch={liveMatch}
         />
       ) : (
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-[280px_1fr_300px] gap-4 p-4 max-w-[1400px] w-full mx-auto">
         <LeftPanel budgets={budgets} squads={squads} managers={managers} removeManager={removeManager} />
         <CenterStage
           current={current}
-          timeLeft={timeLeft}
-          running={running}
           bidHistory={bidHistory}
           budgets={budgets}
           viewAs={viewAs}
@@ -998,21 +1313,11 @@ function App() {
           viewAs={viewAs}
           pool={pool}
           current={current}
-          running={running}
-          selectPlayer={selectPlayer}
-          startAuction={startAuction}
-          pauseAuction={pauseAuction}
-          resumeAuction={resumeAuction}
-          markSoldNow={markSoldNow}
-          skipPlayer={skipPlayer}
           log={log}
           budgets={budgets}
           squads={squads}
           placeBid={placeBid}
           managers={managers}
-          defaultBasePrice={defaultBasePrice}
-          setDefaultBasePrice={setDefaultBasePrice}
-          updateBasePrice={updateBasePrice}
           phase={phase}
           startLeague={startLeague}
           simulateEntireAuction={simulateEntireAuction}
@@ -1042,9 +1347,15 @@ function TopBar({ viewAs, setViewAs, poolCount, managers, addManager, phase }) {
   return (
     <div className="border-b" style={{ borderColor: "var(--panel-line)", background: "var(--pitch-deep)" }}>
       <div className="max-w-[1400px] mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-baseline gap-3">
-          <span className="display text-3xl leading-none" style={{ color: "var(--gold)" }}>XOLO</span>
-          <span className="text-sm" style={{ color: "var(--muted)" }}>Room: FRIDAY-FOOTBALL · Code FTB7X9 · {poolCount} players left</span>
+        <div className="flex items-center gap-3">
+          <span className="display text-3xl leading-none" style={{ color: "var(--gold)", letterSpacing: "0.04em" }}>XOLO</span>
+          <span
+            className="text-[11px] uppercase tracking-widest px-2.5 py-1 rounded-full"
+            style={{ background: "var(--panel)", border: "1px solid var(--panel-line)", color: "var(--muted)" }}
+          >
+            FRIDAY-FOOTBALL · FTB7X9
+          </span>
+          <span className="hidden sm:inline text-xs" style={{ color: "var(--muted)" }}>{poolCount} players left</span>
         </div>
         <div className="flex flex-wrap items-center gap-3 text-sm">
           {phase !== "league" && (
@@ -1056,34 +1367,27 @@ function TopBar({ viewAs, setViewAs, poolCount, managers, addManager, phase }) {
               onChange={e => setJoinName(e.target.value)}
               placeholder="Your name…"
               maxLength={MAX_NAME_LENGTH}
-              className="rounded px-2 py-1 text-sm"
+              className="rounded-full px-3 py-1.5 text-sm"
               style={{ background: "var(--panel)", border: "1px solid var(--panel-line)", color: "var(--chalk)" }}
             />
             <button
               type="submit"
               disabled={!joinName.trim()}
-              className="rounded px-3 py-1 font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+              className="btn-pill px-4 py-1.5 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
               style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}
             >
               Join as manager
             </button>
           </form>
           )}
-          <div className="flex items-center gap-2">
-            <span style={{ color: "var(--muted)" }}>Viewing as</span>
-            <select
-              aria-label="Viewing as"
-              value={viewAs}
-              onChange={e => setViewAs(e.target.value)}
-              className="rounded px-2 py-1 text-sm"
-              style={{ background: "var(--panel)", border: "1px solid var(--panel-line)", color: "var(--chalk)" }}
-            >
-              <option value="auctioneer">Auctioneer</option>
-              {managers.map(m => (
-                <option key={m.id} value={m.id}>{m.bot ? `${m.name} (CPU)` : `${m.name} (Manager)`}</option>
-              ))}
-            </select>
-          </div>
+          {viewAs && (
+            <span className="text-xs" style={{ color: "var(--muted)" }}>
+              Playing as <strong style={{ color: "var(--chalk)" }}>{managers.find(m => m.id === viewAs)?.name ?? "Manager"}</strong> · Auctioneer Bot active
+            </span>
+          )}
+          {!viewAs && managers.length === 0 && phase !== "league" && (
+            <span className="text-xs" style={{ color: "var(--muted)" }}>Auctioneer Bot · waiting for managers</span>
+          )}
         </div>
       </div>
     </div>
@@ -1093,13 +1397,13 @@ function TopBar({ viewAs, setViewAs, poolCount, managers, addManager, phase }) {
 // ---------- Left panel: budgets + squads ----------
 function LeftPanel({ budgets, squads, managers, removeManager }) {
   return (
-    <div className="rounded-lg p-4 space-y-4" style={{ background: "var(--panel)", border: "1px solid var(--panel-line)" }}>
+    <div className="card-soft p-4 space-y-4">
       <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>Managers</h2>
       {managers.length === 0 && (
         <p className="text-xs" style={{ color: "var(--muted)" }}>No managers yet — enter a name up top to join.</p>
       )}
       {managers.map(m => (
-        <div key={m.id} className="rounded p-3" style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)" }}>
+        <div key={m.id} className="card-soft p-3" style={{ background: "var(--pitch-deep)" }}>
           <div className="flex items-center justify-between">
             <span>
               <span className="font-semibold" style={{ color: m.color }}>{clubName(m)}</span>
@@ -1107,12 +1411,17 @@ function LeftPanel({ budgets, squads, managers, removeManager }) {
             </span>
             <span className="display text-xl" style={{ color: "var(--chalk)" }}>{crFmt(budgets[m.id])}</span>
           </div>
-          <div className="mt-2 text-xs" style={{ color: "var(--muted)" }}>
+          <div className="mt-2 text-xs uppercase tracking-widest" style={{ color: "var(--muted)" }}>
             Squad {squads[m.id].length} / {SQUAD_SIZE}
           </div>
-          <div className="mt-1 flex flex-wrap gap-1">
+          <div className="mt-2 flex flex-wrap gap-1.5">
             {squads[m.id].map(p => (
-              <span key={p.id} className="text-[11px] px-1.5 py-0.5 rounded" style={{ background: "var(--panel)", border: "1px solid var(--panel-line)" }}>
+              <span
+                key={p.id}
+                className="inline-flex items-center gap-1.5 text-[11px] pl-1 pr-2 py-0.5 rounded-full"
+                style={{ background: "var(--panel)", border: "1px solid var(--panel-line)" }}
+              >
+                <span className="jersey-badge" style={{ width: "1.35rem", height: "1.35rem", fontSize: "0.7rem" }}>{p.rating}</span>
                 {p.name.split(" ").slice(-1)[0]}
               </span>
             ))}
@@ -1137,51 +1446,45 @@ function LeftPanel({ budgets, squads, managers, removeManager }) {
 }
 
 // ---------- Center stage: the live auction card ----------
-function CenterStage({ current, timeLeft, running, bidHistory, budgets, viewAs, placeBid, managers }) {
-  const isManager = viewAs !== "auctioneer";
+function CenterStage({ current, bidHistory, budgets, viewAs, placeBid, managers }) {
+  const isManager = !!viewAs;
 
   return (
-    <div className="rounded-lg p-6 flex flex-col items-center justify-center text-center min-h-[480px]"
-      style={{ background: "var(--panel)", border: "1px solid var(--panel-line)" }}>
+    <div className="card-soft p-6 flex flex-col items-center justify-center text-center min-h-[480px]">
       {!current && (
         <div style={{ color: "var(--muted)" }}>
           <p className="display text-3xl" style={{ color: "var(--chalk)" }}>No player under auction</p>
-          <p className="mt-2 text-sm">Waiting for the auctioneer to select the next player.</p>
+          <p className="mt-2 text-sm">Waiting for the Auctioneer Bot to start the next player.</p>
         </div>
       )}
 
       {current && (
         <React.Fragment>
-          <div className="text-xs uppercase tracking-wide mb-2" style={{ color: "var(--muted)" }}>
+          <div className="text-xs uppercase tracking-widest mb-3" style={{ color: "var(--muted)" }}>
             {current.status === "sold" ? "Sold" : current.status === "unsold" ? "Unsold" : "Player on auction"}
           </div>
+          <span className="jersey-badge mb-2" style={{ width: "2.5rem", height: "2.5rem", fontSize: "1.35rem" }}>
+            {current.player.rating}
+          </span>
           <h1 className="display text-6xl leading-none" style={{ color: "var(--chalk)" }}>{current.player.name}</h1>
-          <p className="mt-1 text-sm" style={{ color: "var(--muted)" }}>
-            {current.player.pos} · {current.player.club} · {current.player.nation} · Rating {current.player.rating}
-          </p>
-
-          <div className="mt-6 text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>
-            Base price {crFmt(current.base)}
+          <div className="mt-2 flex flex-wrap gap-1.5 justify-center">
+            {[current.player.pos, current.player.club, current.player.nation].map((tag, i) => (
+              <span
+                key={i}
+                className="text-[11px] uppercase tracking-wide px-2.5 py-1 rounded-full"
+                style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)", color: "var(--muted)" }}
+              >
+                {tag}
+              </span>
+            ))}
           </div>
+
           <div className="display text-7xl mt-1" style={{ color: "var(--gold)" }}>
             {crFmt(current.bid)}
           </div>
           <div className="text-sm mt-1" style={{ color: current.bidder ? "var(--chalk)" : "var(--muted)" }}>
             {current.bidder ? `Highest bidder: ${managerDisplayName(managers.find(m => m.id === current.bidder))}` : "No bids yet"}
           </div>
-
-          {current.status === "live" && (
-            <div
-              className="display text-5xl mt-4"
-              style={{ color: timeLeft <= 5 ? "var(--bid-alert)" : "var(--chalk)" }}
-              role="timer"
-              aria-live="polite"
-              aria-atomic="true"
-              aria-label={`${timeLeft} seconds remaining`}
-            >
-              00:{String(timeLeft).padStart(2, "0")}
-            </div>
-          )}
 
           {current.status === "sold" && (
             <div className="mt-4 px-4 py-1 rounded font-semibold" style={{ background: "var(--gold)", color: "var(--pitch-deep)" }} role="status" aria-live="polite">
@@ -1208,9 +1511,17 @@ function CenterStage({ current, timeLeft, running, bidHistory, budgets, viewAs, 
           )}
 
           {isManager && current.status === "live" && (
-            <p className="mt-8 text-xs" style={{ color: "var(--muted)" }}>
-              Call out your bid — the auctioneer will record it. Your budget: {crFmt(budgets[viewAs])}.
-            </p>
+            <React.Fragment>
+              <p className="mt-8 text-xs" style={{ color: "var(--muted)" }}>
+                Place your bid — the Auctioneer Bot is running the auction. Your budget: {crFmt(budgets[viewAs] || 0)}.
+              </p>
+              <ManagerBidEntry
+                current={current}
+                managerId={viewAs}
+                budget={budgets[viewAs] || 0}
+                placeBid={placeBid}
+              />
+            </React.Fragment>
           )}
         </React.Fragment>
       )}
@@ -1218,320 +1529,123 @@ function CenterStage({ current, timeLeft, running, bidHistory, budgets, viewAs, 
   );
 }
 
-// ---------- Auctioneer-controlled bid entry ----------
-// The auctioneer calls out whatever bid is actually made on the floor and assigns it to
-// a manager — the app no longer just auto-suggests the next +1cr step.
-function AuctioneerBidEntry({ current, budgets, squads, placeBid, managers }) {
-  const [managerId, setManagerId] = useState(managers[0]?.id ?? "");
-  const [amount, setAmount] = useState(current.bid + BID_STEP);
+function ManagerBidEntry({ current, managerId, budget, placeBid }) {
+  const [amount, setAmount] = useState(current?.bid ?? BID_STEP);
 
-  // Keep the input pre-filled with a sensible next amount, but the auctioneer can change it.
   useEffect(() => {
-    setAmount(current.bid + BID_STEP);
-  }, [current.bid]);
+    setAmount((current?.bid ?? 0) + BID_STEP);
+  }, [current?.player?.id, current?.bid]);
 
-  // If the selected manager left (or none was selected yet), fall back to the first available.
-  useEffect(() => {
-    if (!managers.some(m => m.id === managerId)) {
-      setManagerId(managers[0]?.id ?? "");
-    }
-  }, [managers, managerId]);
+  if (!current || current.status !== "live" || !managerId) return null;
 
   const numericAmount = Number(amount);
-  const isValid = Number.isFinite(numericAmount) && numericAmount > current.bid && !!managerId;
+  const isValid = Number.isFinite(numericAmount) && numericAmount > current.bid && numericAmount <= budget;
 
   function submit() {
-    if (!isValid) return;
-    placeBid(managerId, numericAmount);
-  }
-
-  if (managers.length === 0) {
-    return (
-      <div className="pt-2 border-t" style={{ borderColor: "var(--panel-line)" }}>
-        <p className="text-xs" style={{ color: "var(--muted)" }}>No managers have joined yet — share the page so people can enter their name up top.</p>
-      </div>
-    );
+    if (isValid) placeBid(managerId, numericAmount);
   }
 
   return (
-    <div className="pt-2 border-t flex flex-col gap-2" style={{ borderColor: "var(--panel-line)" }}>
-      <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>Call a bid</h2>
-      <p className="text-[11px]" style={{ color: "var(--muted)" }}>
-        Enter the amount actually called out — it doesn't have to be the suggested step.
-      </p>
+    <div className="mt-6 pt-4 border-t w-full max-w-md" style={{ borderColor: "var(--panel-line)" }}>
       <div className="flex gap-2">
-        <select
-          aria-label="Manager placing the bid"
-          value={managerId}
-          onChange={e => setManagerId(e.target.value)}
-          className="flex-1 rounded px-2 py-1.5 text-sm"
-          style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)", color: "var(--chalk)" }}
-        >
-          {managers.map(m => (
-            <option key={m.id} value={m.id}>{managerDisplayName(m)} — {crFmt(budgets[m.id])} left</option>
-          ))}
-        </select>
         <input
-          aria-label="Bid amount in crores"
+          aria-label="Your bid amount in crores"
           type="number"
-          min={current.bid + 1}
+          min={current.bid + BID_STEP}
           step={1}
           value={amount}
           onChange={e => setAmount(e.target.value)}
-          className="w-24 rounded px-2 py-1.5 text-sm"
-          style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)", color: "var(--chalk)" }}
-        />
-      </div>
-      <button
-        onClick={submit}
-        disabled={!isValid}
-        className="rounded-md py-2 font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
-        style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}
-      >
-        Confirm bid — {crFmt(Number.isFinite(numericAmount) ? numericAmount : current.bid + BID_STEP)} to {managers.find(m => m.id === managerId)?.name ?? "—"}
-      </button>
-      {!isValid && (
-        <p className="text-[11px]" style={{ color: "var(--muted)" }}>Bid must be higher than the current {crFmt(current.bid)}.</p>
-      )}
-    </div>
-  );
-}
-
-// ---------- Setup: the default base price applied to every newly-selected player ----------
-function DefaultBasePriceControl({ defaultBasePrice, setDefaultBasePrice }) {
-  const [amount, setAmount] = useState(defaultBasePrice);
-
-  const numericAmount = Number(amount);
-  const isValid = Number.isFinite(numericAmount) && numericAmount > 0;
-
-  function apply() {
-    if (!isValid) return;
-    setDefaultBasePrice(numericAmount);
-  }
-
-  return (
-    <div className="pb-2 border-b flex flex-col gap-2" style={{ borderColor: "var(--panel-line)" }}>
-      <label htmlFor="default-base-input" className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>
-        Default base price
-      </label>
-      <div className="flex gap-2">
-        <input
-          id="default-base-input"
-          type="number"
-          min={1}
-          step={1}
-          value={amount}
-          onChange={e => setAmount(e.target.value)}
-          className="flex-1 rounded px-2 py-1.5 text-sm"
+          className="flex-1 rounded-full px-3 py-2 text-sm"
           style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)", color: "var(--chalk)" }}
         />
         <button
-          onClick={apply}
+          onClick={submit}
           disabled={!isValid}
-          className="rounded-md px-3 py-1.5 text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+          className="btn-pill px-5 py-2 disabled:opacity-40 disabled:cursor-not-allowed"
           style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}
         >
-          Set
+          Bid {Number.isFinite(numericAmount) ? crFmt(numericAmount) : ""}
         </button>
       </div>
-      <p className="text-[11px]" style={{ color: "var(--muted)" }}>
-        Currently {crFmt(defaultBasePrice)}. Applied to every player you select from now on — you can still override it per player below.
+      <p className="mt-2 text-[11px]" style={{ color: "var(--muted)" }}>
+        The Auctioneer Bot automatically settles the auction after bidding goes quiet. No countdown is shown.
       </p>
     </div>
   );
 }
 
-// ---------- Per-player override, shown after a player is selected and before the auction goes live ----------
-function BasePriceControl({ current, updateBasePrice }) {
-  const [amount, setAmount] = useState(current.base);
-
-  // Re-sync the input only when a different player is selected, not on every keystroke.
-  useEffect(() => {
-    setAmount(current.base);
-  }, [current.player.id]);
-
-  const numericAmount = Number(amount);
-  const isValid = Number.isFinite(numericAmount) && numericAmount > 0;
-
-  function apply() {
-    if (!isValid) return;
-    updateBasePrice(numericAmount);
-  }
-
-  return (
-    <div className="pt-2 border-t flex flex-col gap-2" style={{ borderColor: "var(--panel-line)" }}>
-      <label htmlFor="player-base-input" className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>
-        Base price for {current.player.name}
-      </label>
-      <div className="flex gap-2">
-        <input
-          id="player-base-input"
-          type="number"
-          min={1}
-          step={1}
-          value={amount}
-          onChange={e => setAmount(e.target.value)}
-          className="flex-1 rounded px-2 py-1.5 text-sm"
-          style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)", color: "var(--chalk)" }}
-        />
-        <button
-          onClick={apply}
-          disabled={!isValid}
-          className="rounded-md px-3 py-1.5 text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
-          style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}
-        >
-          Override
-        </button>
-      </div>
-      {!isValid && (
-        <p className="text-[11px]" style={{ color: "var(--muted)" }}>Enter a base price greater than 0.</p>
-      )}
-    </div>
-  );
-}
-
-// ---------- Right panel: auctioneer controls or manager log ----------
 function RightPanel(props) {
-  const { viewAs, pool, current, running, selectPlayer, startAuction, pauseAuction, resumeAuction, markSoldNow, skipPlayer, log, budgets, squads, placeBid, managers, defaultBasePrice, setDefaultBasePrice, updateBasePrice, phase, startLeague, simulateEntireAuction } = props;
-  const [search, setSearch] = useState("");
-  const filtered = pool.filter(p => p.name.toLowerCase().includes(search.toLowerCase()));
+  const { viewAs, log, budgets, squads, managers, phase, startLeague, simulateEntireAuction } = props;
+  const currentManager = managers.find(m => m.id === viewAs);
 
   return (
-    <div className="rounded-lg p-4 flex flex-col gap-4" style={{ background: "var(--panel)", border: "1px solid var(--panel-line)" }}>
-      {viewAs === "auctioneer" ? (
-        <React.Fragment>
-          <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>Auction control</h2>
+    <div className="card-soft p-4 flex flex-col gap-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>Auctioneer Bot</h2>
+        <span className="text-[10px] uppercase tracking-wider px-2 py-1 rounded-full" style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}>ACTIVE</span>
+      </div>
 
-          <DefaultBasePriceControl defaultBasePrice={defaultBasePrice} setDefaultBasePrice={setDefaultBasePrice} />
+      <div className="rounded-lg p-3" style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)" }}>
+        <p className="text-sm font-semibold" style={{ color: "var(--chalk)" }}>XOLO Auctioneer</p>
+        <p className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
+          The auctioneer is an automated bot. It selects players, generates varied opening prices, runs bidding and resolves SOLD/UNSOLD automatically.
+        </p>
+      </div>
 
-          <input
-            aria-label="Search player by name"
-            placeholder="Search player…"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            className="rounded px-2 py-1.5 text-sm"
-            style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)", color: "var(--chalk)" }}
-          />
-          <div className="max-h-40 overflow-y-auto flex flex-col gap-1">
-            {filtered.map(p => (
-              <button
-                key={p.id}
-                onClick={() => selectPlayer(p)}
-                disabled={running}
-                className="text-left text-sm px-2 py-1.5 rounded disabled:opacity-40"
-                style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)" }}
-              >
-                <span className="font-medium">{p.name}</span>
-                <span className="ml-2 text-xs" style={{ color: "var(--muted)" }}>{p.pos} · {p.club}</span>
-              </button>
-            ))}
-            {filtered.length === 0 && <p className="text-xs" style={{ color: "var(--muted)" }}>No matches.</p>}
-          </div>
-
-          {current && current.status === "idle" && (
-            <BasePriceControl current={current} updateBasePrice={updateBasePrice} />
-          )}
-
-          <div className="pt-2 border-t flex flex-col gap-2" style={{ borderColor: "var(--panel-line)" }}>
-            {!running && current && current.status === "idle" && (
-              <button
-                onClick={startAuction}
-                disabled={managers.length === 0}
-                aria-label={managers.length === 0 ? "Start auction — add a manager first" : "Start auction"}
-                className="rounded-md py-2 font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
-                style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}
-              >
-                Start auction
-              </button>
-            )}
-            {running && (
-              <button onClick={pauseAuction} className="rounded-md py-2 font-semibold" style={{ background: "var(--panel-line)", color: "var(--chalk)" }}>
-                Pause
-              </button>
-            )}
-            {!running && current && current.status === "live" && (
-              <button onClick={resumeAuction} className="rounded-md py-2 font-semibold" style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}>
-                Resume
-              </button>
-            )}
-            {current && (current.status === "live") && (
-              <button onClick={markSoldNow} className="rounded-md py-2 font-semibold" style={{ background: "#3a7a52", color: "var(--chalk)" }}>
-                End now (Sold/Unsold)
-              </button>
-            )}
-            {current && current.status !== "sold" && (
-              <button onClick={skipPlayer} aria-label="Skip this player without a sale" className="rounded-md py-2 font-semibold" style={{ background: "var(--bid)", color: "#ffffff" }}>
-                Skip player
-              </button>
-            )}
-          </div>
-
-          {current && current.status === "live" && (
-            <AuctioneerBidEntry current={current} budgets={budgets} squads={squads} placeBid={placeBid} managers={managers} />
-          )}
-
-          {phase === "auction" && (
-            <div className="pt-2 border-t flex flex-col gap-2" style={{ borderColor: "var(--panel-line)" }}>
-              <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>Fast-forward</h2>
-              <p className="text-[11px]" style={{ color: "var(--muted)" }}>
-                Instantly resolves every remaining player with CPU bidding.
-                {managers.length < SIMULATE_TARGET_MANAGERS
-                  ? ` Adds CPU bot managers first so it's a real contest, even solo.`
-                  : ""}
-              </p>
-              <button
-                onClick={simulateEntireAuction}
-                disabled={pool.length === 0}
-                aria-label="Simulate entire auction"
-                className="rounded-md py-2 font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
-                style={{ background: "var(--panel-line)", color: "var(--chalk)" }}
-              >
-                Simulate entire auction
-              </button>
-            </div>
-          )}
-
-          {phase === "auction" && (
-            <div className="pt-2 border-t flex flex-col gap-2" style={{ borderColor: "var(--panel-line)" }}>
-              <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>Premier League</h2>
-              <p className="text-[11px]" style={{ color: "var(--muted)" }}>
-                Always a full 20-club season — any club nobody drafted plays as a CPU team built from real players.
-                {managers.some(m => (squads[m.id] || []).length < SQUAD_SIZE)
-                  ? " Some of your drafted squads aren't full yet, but you can still start."
-                  : ""}
-              </p>
-              <button
-                onClick={startLeague}
-                aria-label="Start Premier League"
-                className="rounded-md py-2 font-semibold"
-                style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}
-              >
-                Start Premier League
-              </button>
-            </div>
-          )}
-        </React.Fragment>
-      ) : (
-        <div>
+      {currentManager ? (
+        <div className="pt-2 border-t" style={{ borderColor: "var(--panel-line)" }}>
           <h2 className="text-xs uppercase tracking-wide mb-2" style={{ color: "var(--muted)" }}>Your status</h2>
           <p className="text-sm" style={{ color: "var(--muted)" }}>
-            You're watching as <span style={{ color: "var(--chalk)" }}>{managers.find(m => m.id === viewAs)?.name ?? "—"}</span>.
-            Only the auctioneer can enter bids — call yours out loud and they'll record it against your budget.
-            Switch "Viewing as" at the top to check other managers or the auctioneer view.
+            You are <span style={{ color: "var(--chalk)" }}>{currentManager.name}</span>. Place bids while the Auctioneer Bot runs the auction.
           </p>
+        </div>
+      ) : (
+        <p className="text-xs" style={{ color: "var(--muted)" }}>Enter your name above to join as a manager. The bot will start the auction automatically.</p>
+      )}
+
+      {phase === "auction" && (
+        <div className="pt-2 border-t flex flex-col gap-2" style={{ borderColor: "var(--panel-line)" }}>
+          <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>Fast-forward</h2>
+          <p className="text-[11px]" style={{ color: "var(--muted)" }}>
+            Instantly resolves every remaining player with the existing CPU bidding simulation.
+            {managers.length < SIMULATE_TARGET_MANAGERS ? " Adds CPU bot managers first so it's a real contest, even solo." : ""}
+          </p>
+          <button
+            onClick={simulateEntireAuction}
+            disabled={managers.length === 0}
+            aria-label="Simulate entire auction"
+            className="btn-pill py-2.5 px-4 disabled:opacity-40 disabled:cursor-not-allowed"
+            style={{ background: "var(--panel-line)", color: "var(--chalk)" }}
+          >
+            Simulate entire auction
+          </button>
+        </div>
+      )}
+
+      {phase === "auction" && (
+        <div className="pt-2 border-t flex flex-col gap-2" style={{ borderColor: "var(--panel-line)" }}>
+          <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>Premier League</h2>
+          <p className="text-[11px]" style={{ color: "var(--muted)" }}>
+            Always a full 20-club season — any club nobody drafted plays as a CPU team built from real players.
+            {managers.some(m => (squads[m.id] || []).length < SQUAD_SIZE)
+              ? " Some of your drafted squads aren't full yet, but you can still start."
+              : ""}
+          </p>
+          <button
+            onClick={startLeague}
+            disabled={managers.length === 0}
+            aria-label="Start Premier League"
+            className="btn-pill py-2.5 px-4 disabled:opacity-40 disabled:cursor-not-allowed"
+            style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}
+          >
+            Start Premier League
+          </button>
         </div>
       )}
 
       <div className="pt-2 border-t flex-1 min-h-0" style={{ borderColor: "var(--panel-line)" }}>
         <h2 className="text-xs uppercase tracking-wide mb-2" style={{ color: "var(--muted)" }}>Auction log</h2>
-        <div
-          className="text-xs space-y-1 max-h-56 overflow-y-auto"
-          style={{ color: "var(--muted)" }}
-          role="log"
-          aria-live="polite"
-          aria-relevant="additions"
-          aria-label="Auction activity log"
-        >
+        <div className="text-xs space-y-1 max-h-56 overflow-y-auto" style={{ color: "var(--muted)" }} role="log" aria-live="polite" aria-relevant="additions" aria-label="Auction activity log">
           {log.map((l, i) => <p key={i}>{l}</p>)}
         </div>
       </div>
@@ -1540,17 +1654,117 @@ function RightPanel(props) {
 }
 
 // ---------- League phase: table + fixtures ----------
-function LeagueView({ teams, fixtures, simulateMatchday, simulateFullSeason, viewAs, lastSimulatedKeys }) {
+function AwardCard({ title, icon, winner, detail }) {
+  return (
+    <div className="rounded-md p-3" style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)" }}>
+      <div className="text-xs uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>{icon} {title}</div>
+      {winner ? (
+        <>
+          <div className="font-semibold text-lg leading-tight">{winner.name}</div>
+          <div className="text-xs" style={{ color: "var(--muted)" }}>{winner.teamName} · {detail}</div>
+        </>
+      ) : (
+        <div className="text-sm" style={{ color: "var(--muted)" }}>Not yet awarded</div>
+      )}
+    </div>
+  );
+}
+
+function LiveMatchTicker({ liveMatch }) {
+  if (!liveMatch) return null;
+  const runningHome = liveMatch.events.filter(e => e.side === "home").length;
+  const runningAway = liveMatch.events.filter(e => e.side === "away").length;
+  return (
+    <div
+      className="rounded-lg p-4"
+      style={{ background: "var(--panel)", border: "1px solid var(--gold)" }}
+      role="status"
+      aria-live="polite"
+    >
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>
+          {liveMatch.finished
+            ? (liveMatch.penalties ? "Full-time — penalties" : "Full-time")
+            : `Live — ${formatMinute(liveMatch.minute || 1)}`}
+        </span>
+        <span className="text-xs uppercase tracking-wide font-semibold" style={{ color: "var(--gold)" }}>Grudge match</span>
+      </div>
+      <div className="flex items-center justify-center gap-4 mb-3">
+        <span className="font-semibold text-lg text-right flex-1" style={{ color: liveMatch.homeColor }}>{liveMatch.homeName}</span>
+        <span className="display text-3xl px-2" style={{ color: "var(--chalk)" }}>{runningHome} – {runningAway}</span>
+        <span className="font-semibold text-lg flex-1" style={{ color: liveMatch.awayColor }}>{liveMatch.awayName}</span>
+      </div>
+      <ul className="space-y-1 text-sm max-h-40 overflow-y-auto">
+        {liveMatch.events.length === 0 && !liveMatch.finished && (
+          <li className="text-center" style={{ color: "var(--muted)" }}>Kick-off…</li>
+        )}
+        {liveMatch.events.map((ev, i) => (
+          <li key={i} className="flex justify-between gap-2">
+            <span style={{ color: "var(--muted)" }}>{formatMinute(ev.minute)}</span>
+            <span>⚽ {ev.scorer.name} <span style={{ color: "var(--muted)" }}>({ev.side === "home" ? liveMatch.homeName : liveMatch.awayName})</span></span>
+          </li>
+        ))}
+      </ul>
+      {liveMatch.finished && liveMatch.penalties && (
+        <div className="mt-3 pt-3 text-sm" style={{ borderTop: "1px solid var(--panel-line)" }}>
+          <div className="font-semibold mb-1">
+            🥅 Penalties: {liveMatch.penalties.homeScore} – {liveMatch.penalties.awayScore}
+          </div>
+          <div style={{ color: "var(--muted)" }}>
+            {liveMatch.penalties.winnerSide === "home" ? liveMatch.homeName : liveMatch.awayName} win the shootout — bragging rights only, the league table still records this as a draw.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LeagueView({ teams, fixtures, simulateMatchday, simulateFullSeason, viewAs, lastSimulatedKeys, liveMatch }) {
   const standings = computeStandings(teams, fixtures);
   const byId = Object.fromEntries(teams.map(t => [t.id, t]));
   const nextUnplayed = fixtures.findIndex(md => md.some(f => isRealFixture(f) && !f.played));
   const hasUnplayed = nextUnplayed !== -1;
-  const isAuctioneer = viewAs === "auctioneer";
+  const seasonComplete = !hasUnplayed && fixtures.length > 0;
+  const isAuctioneer = true; // league simulation is controlled by the game/Auctioneer Bot, not a human role
   const liveSet = new Set(lastSimulatedKeys || []);
+  const awards = computeSeasonAwards(teams, fixtures);
 
   return (
-    <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_1fr] gap-4 p-4 max-w-[1400px] w-full mx-auto">
-      <div className="rounded-lg p-4 overflow-x-auto" style={{ background: "var(--panel)", border: "1px solid var(--panel-line)" }}>
+    <div className="flex-1 flex flex-col gap-4 p-4 max-w-[1400px] w-full mx-auto">
+      <LiveMatchTicker liveMatch={liveMatch} />
+      {seasonComplete && (
+        <div
+          className="rounded-lg p-4"
+          style={{ background: "var(--panel)", border: "1px solid var(--gold)" }}
+          role="status"
+          aria-live="polite"
+        >
+          <h2 className="display text-3xl leading-none mb-3" style={{ color: "var(--gold)" }}>Season Awards</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <AwardCard
+              title="Golden Boot"
+              icon="⚽"
+              winner={awards.goldenBoot}
+              detail={awards.goldenBoot ? `${awards.goldenBoot.goals} goal${awards.goldenBoot.goals === 1 ? "" : "s"}` : ""}
+            />
+            <AwardCard
+              title="Golden Glove"
+              icon="🧤"
+              winner={awards.goldenGlove}
+              detail={awards.goldenGlove ? `${awards.goldenGlove.cleanSheets} clean sheet${awards.goldenGlove.cleanSheets === 1 ? "" : "s"}` : ""}
+            />
+            <AwardCard
+              title="Player of the Season"
+              icon="🏆"
+              winner={awards.playerOfSeason}
+              detail={awards.playerOfSeason ? `${awards.playerOfSeason.points} pts` : ""}
+            />
+          </div>
+        </div>
+      )}
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr] gap-4">
+      <div className="flex flex-col gap-4">
+      <div className="card-soft p-4 overflow-x-auto">
         <div className="flex items-baseline justify-between gap-2 mb-3">
           <h2 className="display text-3xl leading-none" style={{ color: "var(--gold)" }}>Premier League</h2>
           <span className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>Table</span>
@@ -1602,8 +1816,9 @@ function LeagueView({ teams, fixtures, simulateMatchday, simulateFullSeason, vie
         {isAuctioneer && hasUnplayed && (
           <button
             onClick={simulateFullSeason}
+            disabled={!!liveMatch}
             aria-label="Simulate rest of season"
-            className="mt-4 rounded-md py-2 px-3 font-semibold"
+            className="mt-4 btn-pill py-2 px-4 disabled:opacity-40 disabled:cursor-not-allowed"
             style={{ background: "var(--panel-line)", color: "var(--chalk)" }}
           >
             Simulate rest of season
@@ -1611,7 +1826,24 @@ function LeagueView({ teams, fixtures, simulateMatchday, simulateFullSeason, vie
         )}
       </div>
 
-      <div className="rounded-lg p-4 space-y-4" style={{ background: "var(--panel)", border: "1px solid var(--panel-line)" }}>
+      <div className="card-soft p-4">
+        <h2 className="text-xs uppercase tracking-wide mb-2" style={{ color: "var(--muted)" }}>Top Scorers</h2>
+        {awards.topScorers.length === 0 ? (
+          <p className="text-sm" style={{ color: "var(--muted)" }}>No goals yet.</p>
+        ) : (
+          <ol className="space-y-1 text-sm">
+            {awards.topScorers.slice(0, 8).map((p, i) => (
+              <li key={p.id} className="flex items-center justify-between gap-2">
+                <span>{i + 1}. {p.name} <span className="text-xs" style={{ color: "var(--muted)" }}>({p.teamName})</span></span>
+                <span className="font-semibold">{p.goals}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+      </div>
+
+      <div className="card-soft p-4 space-y-4">
         <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--muted)" }}>Fixtures</h2>
         <div className="space-y-4 max-h-[70vh] overflow-y-auto">
           {fixtures.map((matchday, mdIndex) => (
@@ -1621,8 +1853,9 @@ function LeagueView({ teams, fixtures, simulateMatchday, simulateFullSeason, vie
                 {isAuctioneer && mdIndex === nextUnplayed && (
                   <button
                     onClick={() => simulateMatchday(mdIndex)}
+                    disabled={!!liveMatch}
                     aria-label={`Simulate matchday ${mdIndex + 1}`}
-                    className="rounded px-3 py-1 text-sm font-semibold"
+                    className="btn-pill px-3 py-1 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
                     style={{ background: "var(--gold)", color: "var(--pitch-deep)" }}
                   >
                     Simulate this matchday
@@ -1642,9 +1875,28 @@ function LeagueView({ teams, fixtures, simulateMatchday, simulateFullSeason, vie
                       style={{ background: "var(--pitch-deep)", border: "1px solid var(--panel-line)" }}
                       {...(live ? { role: "status", "aria-live": "polite" } : {})}
                     >
-                      {f.played
-                        ? `${home} ${f.homeGoals} – ${f.awayGoals} ${away}`
-                        : `${home} vs ${away}`}
+                      <div className="flex items-center gap-2">
+                        <span>
+                          {f.played
+                            ? `${home} ${f.homeGoals} – ${f.awayGoals} ${away}`
+                            : `${home} vs ${away}`}
+                          {f.played && f.penalties && ` (pens ${f.penalties.homeScore}-${f.penalties.awayScore})`}
+                        </span>
+                        {f.isPvP && (
+                          <span className="text-[10px] uppercase tracking-wide px-1 py-0.5 rounded" style={{ background: "var(--panel-line)", color: "var(--gold)" }}>PvP</span>
+                        )}
+                      </div>
+                      {f.played && (f.timeline?.length > 0) && (
+                        <div className="mt-1 text-xs" style={{ color: "var(--muted)" }}>
+                          {summarizeTimelineSide(f.timeline, "home") && <div>⚽ {summarizeTimelineSide(f.timeline, "home")}</div>}
+                          {summarizeTimelineSide(f.timeline, "away") && <div>⚽ {summarizeTimelineSide(f.timeline, "away")}</div>}
+                        </div>
+                      )}
+                      {f.played && f.penalties && (
+                        <div className="mt-1 text-xs" style={{ color: "var(--gold)" }}>
+                          🥅 {(f.penalties.winnerSide === "home" ? home : away)} win on penalties
+                        </div>
+                      )}
                     </li>
                   );
                 })}
@@ -1653,6 +1905,7 @@ function LeagueView({ teams, fixtures, simulateMatchday, simulateFullSeason, vie
           ))}
         </div>
       </div>
+    </div>
     </div>
   );
 }
