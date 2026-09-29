@@ -459,7 +459,7 @@ function cpuMaxBid(player, base, budget, squad, remainingPool) {
 function cpuAuctionOne(player, base, managers, budgets, squads, remainingPool) {
   const caps = {};
   managers.forEach(m => {
-    caps[m.id] = cpuMaxBid(player, base, budgets[m.id], squads[m.id], remainingPool);
+    caps[m.id] = cpuMaxBid(player, base, budgets[m.id], squads[m.id] || [], remainingPool);
   });
   let interested = managers.filter(m =>
     caps[m.id] >= base && budgets[m.id] >= base && (squads[m.id] || []).length < SQUAD_SIZE
@@ -1190,24 +1190,37 @@ function App() {
 
   function applySharedState(state) {
     if (!state) return;
-    setManagers(state.managers || []);
-    setBudgets(state.budgets || {});
-    setSquads(state.squads || {});
-    setPool(Array.isArray(state.pool) ? state.pool : Object.values(state.pool || {}));
-    setCurrent(state.current || null);
-    setSkipVotes(state.skipVotes || []);
-    setAuctionTimerVotes(state.auctionTimerVotes || {});
-    setAuctionDuration(state.auctionDuration ?? null);
-    setAuctionDeadlineAt(state.auctionDeadlineAt ?? null);
-    setBidHistory(state.bidHistory || []);
-    setLog(state.log || []);
-    setPhase(state.phase || "auction");
-    setFixtures(state.fixtures || []);
-    setLastSimulatedKeys(state.lastSimulatedKeys || []);
-    setLeagueTeams(state.leagueTeams || []);
-    setLiveMatch(state.liveMatch || null);
-    setBotPaused(!!state.botPaused);
-    setDefaultBasePriceState(state.defaultBasePrice ?? INITIAL_DEFAULT_BASE);
+    const nextManagers = Array.isArray(state.managers) ? state.managers : Object.values(state.managers || {});
+    const nextBudgets = { ...(state.budgets || {}) };
+    const nextSquads = { ...(state.squads || {}) };
+    // Older or partially-written snapshots can briefly contain a manager before
+    // its budget/squad child. Fill safe defaults before publishing the manager list.
+    nextManagers.forEach(manager => {
+      if (!Object.prototype.hasOwnProperty.call(nextBudgets, manager.id)) nextBudgets[manager.id] = START_BUDGET;
+      if (!Array.isArray(nextSquads[manager.id])) nextSquads[manager.id] = [];
+    });
+
+    ReactDOM.unstable_batchedUpdates(() => {
+      setBudgets(nextBudgets);
+      setSquads(nextSquads);
+      setPool(Array.isArray(state.pool) ? state.pool : Object.values(state.pool || {}));
+      setCurrent(state.current || null);
+      setSkipVotes(Array.isArray(state.skipVotes) ? state.skipVotes : Object.values(state.skipVotes || {}));
+      setAuctionTimerVotes(state.auctionTimerVotes || {});
+      setAuctionDuration(state.auctionDuration ?? null);
+      setAuctionDeadlineAt(state.auctionDeadlineAt ?? null);
+      setBidHistory(Array.isArray(state.bidHistory) ? state.bidHistory : Object.values(state.bidHistory || {}));
+      setLog(Array.isArray(state.log) ? state.log : Object.values(state.log || {}));
+      setPhase(state.phase || "auction");
+      setFixtures(Array.isArray(state.fixtures) ? state.fixtures : Object.values(state.fixtures || {}));
+      setLastSimulatedKeys(Array.isArray(state.lastSimulatedKeys) ? state.lastSimulatedKeys : Object.values(state.lastSimulatedKeys || {}));
+      setLeagueTeams(Array.isArray(state.leagueTeams) ? state.leagueTeams : Object.values(state.leagueTeams || {}));
+      setLiveMatch(state.liveMatch || null);
+      setBotPaused(!!state.botPaused);
+      setDefaultBasePriceState(state.defaultBasePrice ?? INITIAL_DEFAULT_BASE);
+      // Publish managers last as a defensive fallback for non-batched renderers.
+      setManagers(nextManagers);
+    });
   }
 
   function randomRoomCode() {
@@ -1359,9 +1372,11 @@ function App() {
     const id = requestedId || makeManagerId();
     const color = MANAGER_COLORS[managers.length % MANAGER_COLORS.length];
     const club = pickNextClub(managers);
-    setManagers(list => [...list, { id, name, color, club }]);
-    setBudgets(b => ({ ...b, [id]: START_BUDGET }));
-    setSquads(s => ({ ...s, [id]: [] }));
+    ReactDOM.unstable_batchedUpdates(() => {
+      setBudgets(b => ({ ...b, [id]: START_BUDGET }));
+      setSquads(s => ({ ...s, [id]: [] }));
+      setManagers(list => [...list, { id, name, color, club }]);
+    });
     addLog(`${name} joined the auction.`);
     return id;
   }
@@ -1550,11 +1565,13 @@ function App() {
       addLog(`Bid rejected — ${Number.isFinite(bidAmount) ? crFmt(bidAmount) : "that amount"} is not higher than the current bid of ${crFmt(current.bid)}.`);
       return;
     }
-    if (budgets[managerId] < bidAmount) {
+    const managerBudget = Number(budgets?.[managerId] || 0);
+    const managerSquad = Array.isArray(squads?.[managerId]) ? squads[managerId] : [];
+    if (managerBudget < bidAmount) {
       addLog(`${label(managerId)} tried to bid but doesn't have enough budget.`);
       return;
     }
-    if (squads[managerId].length >= SQUAD_SIZE) {
+    if (managerSquad.length >= SQUAD_SIZE) {
       addLog(`${label(managerId)} squad is already full.`);
       return;
     }
@@ -2079,7 +2096,9 @@ function LeftPanel({ budgets, squads, managers, removeManager, canRemoveManagers
       {managers.length === 0 && (
         <p className="text-xs" style={{ color: "var(--text-muted)" }}>No managers yet — enter a name up top to join.</p>
       )}
-      {managers.map(m => (
+      {managers.map(m => {
+        const managerSquad = Array.isArray(squads?.[m.id]) ? squads[m.id] : [];
+        return (
         <div key={m.id} className="card-soft p-3.5 space-y-2.5" style={{ background: "var(--surface-2)" }}>
           <div className="flex items-center justify-between">
             <span>
@@ -2089,10 +2108,10 @@ function LeftPanel({ budgets, squads, managers, removeManager, canRemoveManagers
             <span className="display text-2xl font-bold" style={{ color: "var(--text)" }}>{crFmt(budgets[m.id])}</span>
           </div>
           <div className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
-            Squad {squads[m.id].length} / {SQUAD_SIZE}
+            Squad {managerSquad.length} / {SQUAD_SIZE}
           </div>
           <div className="flex flex-wrap gap-1.5">
-            {squads[m.id].map(p => (
+            {managerSquad.map(p => (
               <span
                 key={p.id}
                 className="inline-flex items-center gap-1.5 text-[11px] font-medium pl-1 pr-2.5 py-0.5 rounded-full"
@@ -2102,11 +2121,11 @@ function LeftPanel({ budgets, squads, managers, removeManager, canRemoveManagers
                 {p.name.split(" ").slice(-1)[0]}
               </span>
             ))}
-            {squads[m.id].length === 0 && (
+            {managerSquad.length === 0 && (
               <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>No players yet</span>
             )}
           </div>
-          {canRemoveManagers && squads[m.id].length === 0 && (
+          {canRemoveManagers && managerSquad.length === 0 && (
             <button
               onClick={() => removeManager(m.id)}
               aria-label={`Remove ${m.name} from the auction`}
@@ -2117,7 +2136,8 @@ function LeftPanel({ budgets, squads, managers, removeManager, canRemoveManagers
             </button>
           )}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
