@@ -1148,7 +1148,7 @@ function App() {
       if (user) {
         firebaseSignInRef.current = false;
         setFirebaseUser(user);
-        setFirebaseStatus("Connected");
+        setFirebaseStatus("Connecting to Firebase database…");
         setFirebaseError("");
       } else if (!firebaseSignInRef.current) {
         firebaseSignInRef.current = true;
@@ -1161,6 +1161,20 @@ function App() {
     });
     return unsubscribe;
   }, [firebaseServices]);
+
+  useEffect(() => {
+    if (!firebaseServices || !firebaseUser) return;
+    const connectedRef = firebaseServices.ref(firebaseServices.db, ".info/connected");
+    const unsubscribe = firebaseServices.onValue(connectedRef, snapshot => {
+      const connected = snapshot.val() === true;
+      setFirebaseStatus(connected ? "Connected" : "Connecting to Firebase database…");
+      if (connected) setFirebaseError("");
+    }, error => {
+      setFirebaseStatus("Database unavailable");
+      setFirebaseError(error?.message || "Could not connect to the Firebase Realtime Database.");
+    });
+    return unsubscribe;
+  }, [firebaseServices, firebaseUser?.uid]);
 
   function addLog(msg) {
     setLog(l => [msg, ...l].slice(0, 30));
