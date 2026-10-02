@@ -1215,7 +1215,15 @@ function App() {
       setFixtures(Array.isArray(state.fixtures) ? state.fixtures : Object.values(state.fixtures || {}));
       setLastSimulatedKeys(Array.isArray(state.lastSimulatedKeys) ? state.lastSimulatedKeys : Object.values(state.lastSimulatedKeys || {}));
       setLeagueTeams(Array.isArray(state.leagueTeams) ? state.leagueTeams : Object.values(state.leagueTeams || {}));
-      setLiveMatch(state.liveMatch || null);
+      const liveMatch = state.liveMatch
+        ? {
+          ...state.liveMatch,
+          events: Array.isArray(state.liveMatch.events)
+            ? state.liveMatch.events
+            : Object.values(state.liveMatch.events || {}),
+        }
+        : null;
+      setLiveMatch(liveMatch);
       setBotPaused(!!state.botPaused);
       setDefaultBasePriceState(state.defaultBasePrice ?? INITIAL_DEFAULT_BASE);
       // Publish managers last as a defensive fallback for non-batched renderers.
@@ -2425,8 +2433,9 @@ function AwardCard({ title, icon, winner, detail }) {
 
 function LiveMatchTicker({ liveMatch }) {
   if (!liveMatch) return null;
-  const runningHome = liveMatch.events.filter(e => e.side === "home").length;
-  const runningAway = liveMatch.events.filter(e => e.side === "away").length;
+  const events = Array.isArray(liveMatch.events) ? liveMatch.events : [];
+  const runningHome = events.filter(e => e.side === "home").length;
+  const runningAway = events.filter(e => e.side === "away").length;
   return (
     <div
       className="card-soft p-5 space-y-3"
@@ -2448,13 +2457,13 @@ function LiveMatchTicker({ liveMatch }) {
         <span className="font-bold text-lg flex-1" style={{ color: liveMatch.awayColor }}>{liveMatch.awayName}</span>
       </div>
       <ul className="space-y-1.5 text-sm font-medium max-h-40 overflow-y-auto">
-        {liveMatch.events.length === 0 && !liveMatch.finished && (
+        {events.length === 0 && !liveMatch.finished && (
           <li className="text-center py-2" style={{ color: "var(--text-muted)" }}>Kick-off…</li>
         )}
-        {liveMatch.events.map((ev, i) => (
+        {events.map((ev, i) => (
           <li key={i} className="flex justify-between gap-2">
             <span style={{ color: "var(--text-muted)" }}>{formatMinute(ev.minute)}</span>
-            <span>⚽ {ev.scorer.name} <span style={{ color: "var(--text-muted)" }}>({ev.side === "home" ? liveMatch.homeName : liveMatch.awayName})</span></span>
+            <span>⚽ {ev.scorer?.name || "Unknown player"} <span style={{ color: "var(--text-muted)" }}>({ev.side === "home" ? liveMatch.homeName : liveMatch.awayName})</span></span>
           </li>
         ))}
       </ul>
