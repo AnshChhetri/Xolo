@@ -339,6 +339,48 @@ const PLAYER_POOL = [
 const MANAGER_COLORS = ["#18C964", "#4D8DFF", "#F2B84B", "#EF5350", "#AB47BC", "#26A69A", "#EC407A", "#7E57C2"];
 const MAX_MANAGERS = 10;
 const MAX_NAME_LENGTH = 24;
+const DEFAULT_FORMATION = "4-3-3";
+const FORMATIONS = [
+  { name: "4-3-3", lines: [["GK"], ["LB", "CB", "CB", "RB"], ["CM", "CM", "CM"], ["LW", "ST", "RW"]] },
+  { name: "4-4-2", lines: [["GK"], ["LB", "CB", "CB", "RB"], ["LM", "CM", "CM", "RM"], ["ST", "ST"]] },
+  { name: "4-2-3-1", lines: [["GK"], ["LB", "CB", "CB", "RB"], ["CDM", "CDM"], ["LM", "CAM", "RM"], ["ST"]] },
+  { name: "4-5-1", lines: [["GK"], ["LB", "CB", "CB", "RB"], ["LM", "CM", "CM", "CM", "RM"], ["ST"]] },
+  { name: "3-4-3", lines: [["GK"], ["CB", "CB", "CB"], ["LM", "CM", "CM", "RM"], ["LW", "ST", "RW"]] },
+  { name: "3-5-2", lines: [["GK"], ["CB", "CB", "CB"], ["LM", "CM", "CM", "CM", "RM"], ["ST", "ST"]] },
+  { name: "5-4-1", lines: [["GK"], ["LWB", "CB", "CB", "CB", "RWB"], ["LM", "CM", "CM", "RM"], ["ST"]] },
+  { name: "4-1-2-1-2", lines: [["GK"], ["LB", "CB", "CB", "RB"], ["CDM"], ["CM", "CM"], ["CAM"], ["ST", "ST"]] },
+  { name: "4-4-1-1", lines: [["GK"], ["LB", "CB", "CB", "RB"], ["LM", "CM", "CM", "RM"], ["CF"], ["ST"]] },
+  { name: "5-3-2", lines: [["GK"], ["LWB", "CB", "CB", "CB", "RWB"], ["CM", "CM", "CM"], ["ST", "ST"]] },
+  { name: "3-4-1-2", lines: [["GK"], ["CB", "CB", "CB"], ["LM", "CM", "CM", "RM"], ["CAM"], ["ST", "ST"]] },
+  { name: "4-2-2-2", lines: [["GK"], ["LB", "CB", "CB", "RB"], ["CDM", "CDM"], ["LAM", "RAM"], ["ST", "ST"]] },
+];
+
+function getFormation(name) {
+  return FORMATIONS.find(formation => formation.name === name) || FORMATIONS[0];
+}
+
+function getManagerLineupIds(manager, squad) {
+  const players = Array.isArray(squad) ? squad : [];
+  const saved = Array.isArray(manager?.lineup)
+    ? manager.lineup
+    : manager?.lineup && typeof manager.lineup === "object"
+      ? Array.from({ length: SQUAD_SIZE }, (_, index) => manager.lineup[index] ?? null)
+      : null;
+  if (!saved) return Array.from({ length: SQUAD_SIZE }, (_, index) => players[index]?.id ?? null);
+
+  const available = new Set(players.map(player => player.id));
+  const used = new Set();
+  return Array.from({ length: SQUAD_SIZE }, (_, index) => {
+    const id = saved[index];
+    if (id == null || !available.has(id) || used.has(id)) return null;
+    used.add(id);
+    return id;
+  });
+}
+
+function playingPosition(player) {
+  return player?.assignedPosition || player?.pos || "CM";
+}
 
 const PREMIER_LEAGUE_CLUBS_2026_27 = [
   "Arsenal", "Aston Villa", "Bournemouth", "Brentford", "Brighton", "Chelsea",
@@ -620,6 +662,16 @@ function buildLeagueTeams(managers, squads) {
   return PREMIER_LEAGUE_CLUBS_2026_27.map(club => {
     const manager = claimedByClub[club];
     if (manager) {
+      const managerSquad = squads[manager.id] || [];
+      const playersById = new Map(managerSquad.map(player => [player.id, player]));
+      const managerFormation = getFormation(manager.formation);
+      const formationSlots = managerFormation.lines.flat();
+      const lineup = getManagerLineupIds(manager, managerSquad)
+        .map((playerId, index) => {
+          const player = playersById.get(playerId);
+          return player ? { ...player, assignedPosition: formationSlots[index] || player.pos } : null;
+        })
+        .filter(Boolean);
       return {
         id: club,
         club,
@@ -627,7 +679,9 @@ function buildLeagueTeams(managers, squads) {
         managerName: manager.name,
         isCpu: !!manager.bot,
         color: manager.color,
-        squad: squads[manager.id] || [],
+        formation: managerFormation.name,
+        lineup,
+        squad: managerSquad,
       };
     }
 
@@ -657,6 +711,8 @@ function buildLeagueTeams(managers, squads) {
       managerName: null,
       isCpu: true,
       color: null,
+      formation: DEFAULT_FORMATION,
+      lineup: squad,
       squad,
     };
   });
@@ -730,17 +786,17 @@ function isRealFixture(f) {
   return f && f.home !== BYE_ID && f.away !== BYE_ID;
 }
 
-const GOAL_WEIGHT_BY_POS = { ST: 5, LW: 4, RW: 4, CAM: 4, CM: 2.2, CDM: 1.2, LB: 0.7, RB: 0.7, CB: 0.5, GK: 0.05 };
-const GOAL_POINTS_BY_POS = { GK: 10, CB: 6, LB: 6, RB: 6, CDM: 5, CM: 5, CAM: 4, LW: 4, RW: 4, ST: 4 };
-const CLEANSHEET_POINTS_BY_POS = { GK: 6, CB: 4, LB: 4, RB: 4, CDM: 1 };
-const CLEANSHEET_POSITIONS = ["GK", "CB", "LB", "RB"];
+const GOAL_WEIGHT_BY_POS = { ST: 5, CF: 4.5, LW: 4, RW: 4, CAM: 4, LAM: 4, RAM: 4, LM: 3, RM: 3, CM: 2.2, CDM: 1.2, LB: 0.7, RB: 0.7, LWB: 1, RWB: 1, CB: 0.5, GK: 0.05 };
+const GOAL_POINTS_BY_POS = { GK: 10, CB: 6, LB: 6, RB: 6, LWB: 6, RWB: 6, CDM: 5, CM: 5, LM: 5, RM: 5, CAM: 4, LAM: 4, RAM: 4, LW: 4, RW: 4, CF: 4, ST: 4 };
+const CLEANSHEET_POINTS_BY_POS = { GK: 6, CB: 4, LB: 4, RB: 4, LWB: 4, RWB: 4, CDM: 1 };
+const CLEANSHEET_POSITIONS = ["GK", "CB", "LB", "RB", "LWB", "RWB"];
 
 function pickScorer(squad) {
   const pool = (squad || []).filter(p => p && p.pos);
   if (pool.length === 0) return null;
   const weighted = pool.map(p => ({
     player: p,
-    weight: (GOAL_WEIGHT_BY_POS[p.pos] ?? 1) * Math.max(1, (Number(p.rating) || 60) - 50),
+    weight: (GOAL_WEIGHT_BY_POS[playingPosition(p)] ?? 1) * Math.max(1, (Number(p.rating) || 60) - 50),
   }));
   const total = weighted.reduce((sum, w) => sum + w.weight, 0);
   if (total <= 0) return pool[0];
@@ -762,7 +818,7 @@ function computeSeasonAwards(teams, fixtures) {
       stats[player.id] = {
         id: player.id,
         name: player.name,
-        pos: player.pos,
+        pos: playingPosition(player),
         teamId,
         teamName: team ? team.club : teamId,
         goals: 0,
@@ -781,14 +837,14 @@ function computeSeasonAwards(teams, fixtures) {
 
       if (f.awayGoals === 0) {
         const homeTeam = byTeamId[f.home];
-        (homeTeam?.squad || []).forEach(p => {
-          if (CLEANSHEET_POSITIONS.includes(p.pos)) statRow(p, f.home).cleanSheets += 1;
+        (Array.isArray(homeTeam?.lineup) ? homeTeam.lineup : (homeTeam?.squad || [])).forEach(p => {
+          if (CLEANSHEET_POSITIONS.includes(playingPosition(p))) statRow(p, f.home).cleanSheets += 1;
         });
       }
       if (f.homeGoals === 0) {
         const awayTeam = byTeamId[f.away];
-        (awayTeam?.squad || []).forEach(p => {
-          if (CLEANSHEET_POSITIONS.includes(p.pos)) statRow(p, f.away).cleanSheets += 1;
+        (Array.isArray(awayTeam?.lineup) ? awayTeam.lineup : (awayTeam?.squad || [])).forEach(p => {
+          if (CLEANSHEET_POSITIONS.includes(playingPosition(p))) statRow(p, f.away).cleanSheets += 1;
         });
       }
     });
@@ -853,7 +909,7 @@ function buildMatchTimeline(homeScorers, awayScorers) {
 
 function simulatePenaltyShootout(homeSquad, awaySquad) {
   function takers(squad) {
-    const outfield = (squad || []).filter(p => p.pos !== "GK");
+    const outfield = (squad || []).filter(p => playingPosition(p) !== "GK");
     const pool = outfield.length > 0 ? outfield : (squad || []);
     const sorted = [...pool].sort((a, b) => (Number(b.rating) || 60) - (Number(a.rating) || 60));
     const list = [];
@@ -963,8 +1019,8 @@ function playMatchday(matchdays, index, teamsById) {
       if (f.played || !isRealFixture(f)) return f;
       const homeTeam = teamsById[f.home] || {};
       const awayTeam = teamsById[f.away] || {};
-      const homeSquad = homeTeam.squad || [];
-      const awaySquad = awayTeam.squad || [];
+      const homeSquad = Array.isArray(homeTeam.lineup) ? homeTeam.lineup : (homeTeam.squad || []);
+      const awaySquad = Array.isArray(awayTeam.lineup) ? awayTeam.lineup : (awayTeam.squad || []);
       const { homeGoals, awayGoals } = simulateScore(
         averageRating(homeSquad),
         averageRating(awaySquad)
@@ -972,12 +1028,12 @@ function playMatchday(matchdays, index, teamsById) {
       const homeScorers = [];
       for (let g = 0; g < homeGoals; g++) {
         const scorer = pickScorer(homeSquad);
-        if (scorer) homeScorers.push({ id: scorer.id, name: scorer.name, pos: scorer.pos });
+        if (scorer) homeScorers.push({ id: scorer.id, name: scorer.name, pos: playingPosition(scorer) });
       }
       const awayScorers = [];
       for (let g = 0; g < awayGoals; g++) {
         const scorer = pickScorer(awaySquad);
-        if (scorer) awayScorers.push({ id: scorer.id, name: scorer.name, pos: scorer.pos });
+        if (scorer) awayScorers.push({ id: scorer.id, name: scorer.name, pos: playingPosition(scorer) });
       }
       const timeline = buildMatchTimeline(homeScorers, awayScorers);
       const isPvP = !!homeTeam.managerId && !homeTeam.isCpu && !!awayTeam.managerId && !awayTeam.isCpu;
@@ -1362,7 +1418,7 @@ function App() {
     }
   }
 
-  function addManager(rawName, requestedId = null) {
+  function addManager(rawName, requestedId = null, formationName = DEFAULT_FORMATION) {
     const name = (rawName || "").trim().slice(0, MAX_NAME_LENGTH);
     if (!name) {
       addLog("Enter a name to join as a manager.");
@@ -1380,19 +1436,20 @@ function App() {
     const id = requestedId || makeManagerId();
     const color = MANAGER_COLORS[managers.length % MANAGER_COLORS.length];
     const club = pickNextClub(managers);
+    const formation = getFormation(formationName).name;
     ReactDOM.unstable_batchedUpdates(() => {
       setBudgets(b => ({ ...b, [id]: START_BUDGET }));
       setSquads(s => ({ ...s, [id]: [] }));
-      setManagers(list => [...list, { id, name, color, club }]);
+      setManagers(list => [...list, { id, name, color, club, formation }]);
     });
     addLog(`${name} joined the auction.`);
     return id;
   }
 
-  function joinAsManager(rawName) {
+  function joinAsManager(rawName, formationName = DEFAULT_FORMATION) {
     const name = (rawName || "").trim().slice(0, MAX_NAME_LENGTH);
     if (!roomId) {
-      const id = addManager(name);
+      const id = addManager(name, null, formationName);
       if (id) setViewAs(id);
       return id;
     }
@@ -1404,9 +1461,47 @@ function App() {
       return uid;
     }
     firebaseServices.update(firebaseServices.ref(firebaseServices.db, `rooms/${roomId}/members/${uid}`), { name, managerId: uid }).catch(() => {});
-    if (isRoomHost) return addManager(name, uid);
-    sendRoomCommand("join", { name });
+    if (isRoomHost) return addManager(name, uid, formationName);
+    sendRoomCommand("join", { name, formation: getFormation(formationName).name });
     return uid;
+  }
+
+  function updateManagerFormation(managerId, formationName) {
+    const manager = managers.find(item => item.id === managerId && !item.bot);
+    const formation = FORMATIONS.find(item => item.name === formationName);
+    if (!manager || !formation) return;
+    setManagers(list => list.map(item => item.id === managerId ? { ...item, formation: formation.name } : item));
+  }
+
+  function updateManagerLineupSlot(managerId, slotIndex, selectedPlayerId) {
+    const manager = managers.find(item => item.id === managerId && !item.bot);
+    const squad = Array.isArray(squads[managerId]) ? squads[managerId] : [];
+    const index = Number(slotIndex);
+    if (!manager || !Number.isInteger(index) || index < 0 || index >= SQUAD_SIZE) return;
+    const selectedPlayer = selectedPlayerId == null || selectedPlayerId === ""
+      ? null
+      : squad.find(player => String(player.id) === String(selectedPlayerId));
+    if (selectedPlayerId && !selectedPlayer) return;
+    const playerId = selectedPlayer?.id ?? null;
+    const nextLineup = getManagerLineupIds(manager, squad);
+    const existingIndex = playerId ? nextLineup.indexOf(playerId) : -1;
+    if (existingIndex >= 0 && existingIndex !== index) {
+      nextLineup[existingIndex] = nextLineup[index] || null;
+    }
+    nextLineup[index] = playerId;
+    setManagers(list => list.map(item => item.id === managerId ? { ...item, lineup: nextLineup } : item));
+  }
+
+  function requestManagerFormation(formationName) {
+    if (!viewAs) return;
+    if (roomId && !isRoomHost) { sendRoomCommand("formation", { formation: formationName }); return; }
+    updateManagerFormation(viewAs, formationName);
+  }
+
+  function requestLineupSlot(slotIndex, playerId) {
+    if (!viewAs) return;
+    if (roomId && !isRoomHost) { sendRoomCommand("lineup", { slotIndex, playerId }); return; }
+    updateManagerLineupSlot(viewAs, slotIndex, playerId);
   }
 
   function requestRemoveManager(id) {
@@ -1876,7 +1971,9 @@ function App() {
             const actions = roomActionsRef.current;
             const payload = command.payload || {};
             if (command.type !== "join" && command.type !== "removeManager" && !actions.isManager(command.uid)) return;
-            if (command.type === "join" && typeof payload.name === "string") actions.addManager(payload.name, command.uid);
+            if (command.type === "join" && typeof payload.name === "string") actions.addManager(payload.name, command.uid, payload.formation);
+            else if (command.type === "formation") actions.updateManagerFormation(command.uid, payload.formation);
+            else if (command.type === "lineup") actions.updateManagerLineupSlot(command.uid, payload.slotIndex, payload.playerId);
             else if (command.type === "bid") actions.placeBid(command.uid, payload.amount);
             else if (command.type === "skipVote") actions.voteToSkip(command.uid);
             else if (command.type === "timerVote") actions.voteAuctionTimer(command.uid, Number(payload.seconds));
@@ -1906,7 +2003,7 @@ function App() {
 
   const humanManagers = managers.filter(manager => !manager.bot);
   roomActionsRef.current = {
-    addManager, placeBid, voteToSkip, voteAuctionTimer, removeManager,
+    addManager, placeBid, voteToSkip, voteAuctionTimer, removeManager, updateManagerFormation, updateManagerLineupSlot,
     startLeague, simulateEntireAuction, simulateMatchday, simulateFullSeason,
     isManager: id => managers.some(manager => manager.id === id && !manager.bot)
   };
@@ -1963,6 +2060,8 @@ function App() {
           phase={phase}
           startLeague={requestStartLeague}
           simulateEntireAuction={requestSimulateAuction}
+          onFormationChange={requestManagerFormation}
+          onLineupSlotChange={requestLineupSlot}
         />
       </div>
       )}
@@ -1993,13 +2092,14 @@ function ThemeToggle({ theme, onToggle }) {
 // ---------- Top bar ----------
 function TopBar({ viewAs, setViewAs, poolCount, managers, addManager, phase, theme, onToggleTheme, firebaseStatus, firebaseError, roomCode, roomMembers, isRoomHost, roomMessage, onCreateRoom, onJoinRoom, onLeaveRoom }) {
   const [joinName, setJoinName] = useState("");
+  const [joinFormation, setJoinFormation] = useState(DEFAULT_FORMATION);
   const [roomCodeInput, setRoomCodeInput] = useState(() => {
     try { return localStorage.getItem("xolo-room-code") || ""; } catch (_) { return ""; }
   });
 
   function handleJoin(e) {
     e.preventDefault();
-    const id = addManager(joinName);
+    const id = addManager(joinName, joinFormation);
     if (id) {
       setViewAs(id);
       setJoinName("");
@@ -2054,6 +2154,17 @@ function TopBar({ viewAs, setViewAs, poolCount, managers, addManager, phase, the
               className="rounded-full px-4 py-2 text-sm"
               style={{ background: "var(--surface-2)", border: "1px solid var(--border)", color: "var(--text)" }}
             />
+            <label htmlFor="join-formation-input" className="sr-only">Choose your formation before the auction</label>
+            <select
+              id="join-formation-input"
+              aria-label="Choose your formation before the auction"
+              value={joinFormation}
+              onChange={event => setJoinFormation(event.target.value)}
+              className="rounded-full px-3 py-2 text-xs"
+              style={{ background: "var(--surface-2)", border: "1px solid var(--border)", color: "var(--text)" }}
+            >
+              {FORMATIONS.map(formation => <option key={formation.name} value={formation.name}>{formation.name}</option>)}
+            </select>
             <button
               type="submit"
               disabled={!joinName.trim()}
@@ -2338,8 +2449,70 @@ function ManagerBidEntry({ current, managerId, budget, placeBid }) {
   );
 }
 
+function FormationLineupEditor({ manager, squad, onFormationChange, onLineupSlotChange }) {
+  if (!manager || manager.bot) return null;
+  const players = Array.isArray(squad) ? squad : [];
+  const formation = getFormation(manager.formation);
+  const lineupIds = getManagerLineupIds(manager, players);
+  const slots = formation.lines.flat();
+  const assignedCount = lineupIds.filter(Boolean).length;
+
+  return (
+    <details className="pt-3 border-t" style={{ borderColor: "var(--border)" }}>
+      <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
+        Formation & starting XI
+      </summary>
+      <div className="mt-3 space-y-3">
+        <label className="block text-xs font-semibold" style={{ color: "var(--text-secondary)" }}>
+          Formation
+          <select
+            aria-label="Change formation"
+            value={formation.name}
+            onChange={event => onFormationChange(event.target.value)}
+            className="mt-1 w-full rounded-lg px-3 py-2 text-sm"
+            style={{ background: "var(--surface-2)", border: "1px solid var(--border)", color: "var(--text)" }}
+          >
+            {FORMATIONS.map(item => <option key={item.name} value={item.name}>{item.name}</option>)}
+          </select>
+        </label>
+        <div className="grid grid-cols-1 gap-2">
+          {slots.map((position, index) => {
+            const roleNumber = slots.slice(0, index + 1).filter(role => role === position).length;
+            const slotName = `${position}${roleNumber > 1 ? ` ${roleNumber}` : ""}`;
+            const selectedPlayerId = lineupIds[index] ?? "";
+            return (
+              <label key={`${index}-${position}`} className="grid grid-cols-[5rem_1fr] items-center gap-2 text-xs">
+                <span className="font-bold" style={{ color: "var(--text-secondary)" }}>{slotName}</span>
+                <select
+                  aria-label={`${slotName} slot ${index + 1}`}
+                  value={selectedPlayerId}
+                  onChange={event => onLineupSlotChange(index, event.target.value)}
+                  className="min-w-0 rounded-lg px-2 py-2 text-xs"
+                  style={{ background: "var(--surface-2)", border: "1px solid var(--border)", color: "var(--text)" }}
+                >
+                  <option value="">Empty slot</option>
+                  {players.map(player => {
+                    return (
+                      <option key={player.id} value={player.id}>
+                        {player.name} · {player.pos}
+                      </option>
+                    );
+                  })}
+                </select>
+              </label>
+            );
+          })}
+        </div>
+        <p className="text-[11px] leading-relaxed" style={{ color: "var(--text-muted)" }}>
+          {assignedCount}/{SQUAD_SIZE} players assigned. Any drafted player can fill any slot; natural position does not restrict selection.
+        </p>
+      </div>
+    </details>
+  );
+}
+
 function RightPanel(props) {
-  const { viewAs, log, budgets, squads, managers, phase, startLeague, simulateEntireAuction } = props;
+  const { viewAs, log, budgets, squads, managers, phase, startLeague, simulateEntireAuction, onFormationChange, onLineupSlotChange } = props;
   const currentManager = managers.find(m => m.id === viewAs);
 
   return (
@@ -2365,6 +2538,15 @@ function RightPanel(props) {
         </div>
       ) : (
         <p className="text-xs font-medium" style={{ color: "var(--text-muted)" }}>Enter your name above to join as a manager. The bot will start the auction automatically.</p>
+      )}
+
+      {currentManager && (
+        <FormationLineupEditor
+          manager={currentManager}
+          squad={squads[viewAs] || []}
+          onFormationChange={onFormationChange}
+          onLineupSlotChange={onLineupSlotChange}
+        />
       )}
 
       {phase === "auction" && (
@@ -2484,6 +2666,7 @@ function LiveMatchTicker({ liveMatch }) {
 function LeagueView({ teams, fixtures, simulateMatchday, simulateFullSeason, viewAs, lastSimulatedKeys, liveMatch }) {
   const standings = computeStandings(teams, fixtures);
   const byId = Object.fromEntries(teams.map(t => [t.id, t]));
+  const myTeam = teams.find(team => team.managerId === viewAs && !team.isCpu);
   const nextUnplayed = fixtures.findIndex(md => md.some(f => isRealFixture(f) && !f.played));
   const hasUnplayed = nextUnplayed !== -1;
   const seasonComplete = !hasUnplayed && fixtures.length > 0;
@@ -2494,6 +2677,22 @@ function LeagueView({ teams, fixtures, simulateMatchday, simulateFullSeason, vie
   return (
     <div className="flex-1 flex flex-col gap-6 p-6 max-w-[1400px] w-full mx-auto">
       <LiveMatchTicker liveMatch={liveMatch} />
+      {myTeam && (
+        <details className="card-soft p-4" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
+          <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--text-secondary)" }}>
+            Your formation · {myTeam.formation || DEFAULT_FORMATION} · starting XI
+          </summary>
+          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+            {(myTeam.lineup || []).map((player, index) => (
+              <div key={`${player.id}-${index}`} className="rounded-lg px-3 py-2 text-xs" style={{ background: "var(--surface-2)" }}>
+                <span className="font-bold" style={{ color: "var(--primary)" }}>{player.assignedPosition || player.pos}</span>
+                <span style={{ color: "var(--text)" }}> · {player.name}</span>
+                <span style={{ color: "var(--text-muted)" }}> (natural {player.pos})</span>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
       {seasonComplete && (
         <div
           className="card-soft p-6 space-y-4"
