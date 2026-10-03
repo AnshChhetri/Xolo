@@ -7,9 +7,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Teko:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" integrity="sha384-tMH8h3BGESGckSAVGZ82T9n90ztNXxvdwvdM6UoR56cYcf+0iGXBliJ29D+wZ/x8" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" integrity="sha384-bm7MnzvK++ykSwVJ2tynSE5TRdN+xL418osEVF2DE/L/gfWHj91J2Sphe582B1Bh" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js" integrity="sha384-1qlE7MZPM2pHD/pBZCU/yB8UCP52RYL8bge/qNdfNBCWToySp8/M+JL2waXU4hjJ" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
   try {
@@ -1164,6 +1164,7 @@ function App() {
   const presenceStopRef = useRef(null);
   const processedCommandsRef = useRef(new Set());
   const commandQueueRef = useRef(Promise.resolve());
+  const commandRateLimitRef = useRef(new Map());
   const roomActionsRef = useRef({});
 
   const [inGame, setInGame] = useState(false);
@@ -1289,7 +1290,7 @@ function App() {
 
   function randomRoomCode() {
     const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    const bytes = new Uint8Array(6);
+    const bytes = new Uint8Array(8);
     crypto.getRandomValues(bytes);
     return Array.from(bytes, byte => alphabet[byte % alphabet.length]).join("");
   }
@@ -1326,7 +1327,7 @@ function App() {
     if (!reservedCode) { setRoomMessage("Could not find an unused room code. Please try again."); return; }
 
     try {
-      const member = { uid: hostUid, name: "", online: true, joinedAt: Date.now() };
+      const member = { uid: hostUid, name: "", online: true, joinedAt: Date.now(), roomCode: reservedCode };
       await firebaseServices.set(firebaseServices.ref(db, `rooms/${newRoomId}`), {
         meta: { roomId: newRoomId, code: reservedCode, hostUid, createdAt: Date.now(), version: 1 },
         members: { [hostUid]: member },
@@ -1350,8 +1351,8 @@ function App() {
 
   async function joinOnlineRoom(rawCode) {
     if (!firebaseServices || !firebaseUser) { setRoomMessage("Firebase is still connecting."); return; }
-    const code = String(rawCode || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
-    if (code.length !== 6) { setRoomMessage("Enter the 6-character room code."); return; }
+    const code = String(rawCode || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
+    if (code.length !== 6 && code.length !== 8) { setRoomMessage("Enter the 8-character room code (legacy 6-character codes still work)."); return; }
     setRoomMessage("");
     setFirebaseError("");
     try {
@@ -1361,7 +1362,7 @@ function App() {
       if (!mapping?.roomId || !mapping?.hostUid) { setRoomMessage("Room not found. Check the code and try again."); return; }
       if (mapping.ready !== true) { setRoomMessage("That room is still starting. Wait a moment and try again."); return; }
       const uid = firebaseUser.uid;
-      const member = { uid, name: "", online: true, joinedAt: Date.now() };
+      const member = { uid, name: "", online: true, joinedAt: Date.now(), roomCode: code };
       const memberRef = firebaseServices.ref(db, `rooms/${mapping.roomId}/members/${uid}`);
       await firebaseServices.set(memberRef, member);
       const savedSnapshot = await firebaseServices.get(firebaseServices.ref(db, `rooms/${mapping.roomId}/state`));
@@ -1407,15 +1408,31 @@ function App() {
   async function sendRoomCommand(type, payload = {}) {
     if (!roomId || !firebaseUser || !firebaseServices) return false;
     try {
-      const commandRef = firebaseServices.push(firebaseServices.ref(firebaseServices.db, `rooms/${roomId}/commands`));
+      const commandRef = firebaseServices.ref(firebaseServices.db, `rooms/${roomId}/commands/${firebaseUser.uid}`);
+      const safePayload = JSON.parse(JSON.stringify(payload || {}));
       await firebaseServices.set(commandRef, {
-        uid: firebaseUser.uid, type, payload: JSON.parse(JSON.stringify(payload)), createdAt: firebaseServices.serverTimestamp()
+        uid: firebaseUser.uid, type,
+        ...(Object.keys(safePayload).length ? { payload: safePayload } : {}),
+        createdAt: firebaseServices.serverTimestamp()
       });
       return true;
     } catch (error) {
       setRoomMessage(error?.message || "Could not send that action to the room host.");
       return false;
     }
+  }
+
+  function consumeRoomCommandAllowance(uid) {
+    if (typeof uid !== "string" || !uid) return false;
+    const now = Date.now();
+    const recent = (commandRateLimitRef.current.get(uid) || []).filter(time => now - time < 5000);
+    if (recent.length >= 12) {
+      commandRateLimitRef.current.set(uid, recent);
+      return false;
+    }
+    recent.push(now);
+    commandRateLimitRef.current.set(uid, recent);
+    return true;
   }
 
   function addManager(rawName, requestedId = null, formationName = DEFAULT_FORMATION) {
@@ -1512,7 +1529,11 @@ function App() {
   function requestPlaceBid(managerId, amount) {
     if (!roomId) return placeBid(managerId, amount);
     if (!firebaseUser) return;
-    if (!isRoomHost) { sendRoomCommand("bid", { amount }); return; }
+    if (!isRoomHost) {
+      const bidAmount = amount === undefined || amount === null || amount === "" ? {} : { amount: Number(amount) };
+      sendRoomCommand("bid", bidAmount);
+      return;
+    }
     placeBid(firebaseUser.uid, amount);
   }
 
@@ -1531,22 +1552,22 @@ function App() {
   }
 
   function requestStartLeague() {
-    if (roomId && !isRoomHost) { sendRoomCommand("startLeague"); return; }
+    if (roomId && !isRoomHost) { setRoomMessage("Only the room host can start the league."); return; }
     startLeague();
   }
 
   function requestSimulateAuction() {
-    if (roomId && !isRoomHost) { sendRoomCommand("simulateAuction"); return; }
+    if (roomId && !isRoomHost) { setRoomMessage("Only the room host can fast-forward the auction."); return; }
     simulateEntireAuction();
   }
 
   function requestSimulateMatchday(index) {
-    if (roomId && !isRoomHost) { sendRoomCommand("simulateMatchday", { index }); return; }
+    if (roomId && !isRoomHost) { setRoomMessage("Only the room host can simulate matchdays."); return; }
     simulateMatchday(index);
   }
 
   function requestSimulateSeason() {
-    if (roomId && !isRoomHost) { sendRoomCommand("simulateSeason"); return; }
+    if (roomId && !isRoomHost) { setRoomMessage("Only the room host can simulate the season."); return; }
     simulateFullSeason();
   }
 
@@ -1956,6 +1977,7 @@ function App() {
   useEffect(() => {
     processedCommandsRef.current = new Set();
     commandQueueRef.current = Promise.resolve();
+    commandRateLimitRef.current = new Map();
   }, [roomId]);
 
   useEffect(() => {
@@ -1969,8 +1991,17 @@ function App() {
         commandQueueRef.current = commandQueueRef.current.then(async () => {
           try {
             const actions = roomActionsRef.current;
-            const payload = command.payload || {};
+            if (!command || typeof command !== "object" || Array.isArray(command)) return;
+            const allowedTypes = ["join", "formation", "lineup", "bid", "skipVote", "timerVote", "startLeague", "simulateAuction", "simulateMatchday", "simulateSeason", "removeManager"];
+            if (!allowedTypes.includes(command.type)) return;
+            const payload = command.payload && typeof command.payload === "object" && !Array.isArray(command.payload) ? command.payload : {};
+            const hostOnlyCommand = ["startLeague", "simulateAuction", "simulateMatchday", "simulateSeason", "removeManager"].includes(command.type);
+            if (hostOnlyCommand && command.uid !== roomHostUid) return;
             if (command.type !== "join" && command.type !== "removeManager" && !actions.isManager(command.uid)) return;
+            if (!consumeRoomCommandAllowance(command.uid)) {
+              setRoomMessage("Too many room actions. Please wait a few seconds and try again.");
+              return;
+            }
             if (command.type === "join" && typeof payload.name === "string") actions.addManager(payload.name, command.uid, payload.formation);
             else if (command.type === "formation") actions.updateManagerFormation(command.uid, payload.formation);
             else if (command.type === "lineup") actions.updateManagerLineupSlot(command.uid, payload.slotIndex, payload.playerId);
@@ -1986,7 +2017,13 @@ function App() {
           } catch (error) {
             setRoomMessage(error?.message || "The room host could not process an action.");
           } finally {
-            await firebaseServices.remove(firebaseServices.ref(firebaseServices.db, `rooms/${roomId}/commands/${commandId}`)).catch(() => {});
+            const commandRef = firebaseServices.ref(firebaseServices.db, `rooms/${roomId}/commands/${commandId}`);
+            try {
+              await firebaseServices.remove(commandRef);
+              processedCommandsRef.current.delete(commandId);
+            } catch (error) {
+              setRoomMessage(error?.message || "The room host could not clear a processed action.");
+            }
           }
         });
       });
@@ -2133,8 +2170,8 @@ function TopBar({ viewAs, setViewAs, poolCount, managers, addManager, phase, the
             <div className="flex flex-wrap items-center gap-2">
               <form onSubmit={handleRoomJoin} className="flex items-center gap-2">
                 <label htmlFor="room-code-input" className="sr-only">Room code</label>
-                <input id="room-code-input" value={roomCodeInput} onChange={event => setRoomCodeInput(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6))} placeholder="Room code" maxLength={6} className="w-28 rounded-full px-3 py-2 text-xs uppercase" style={{ background: "var(--surface-2)", border: "1px solid var(--border)", color: "var(--text)" }} />
-                <button type="submit" disabled={roomCodeInput.length !== 6 || firebaseStatus !== "Connected"} className="btn-pill px-3 py-2 text-xs disabled:opacity-40" style={{ background: "var(--surface-2)", border: "1px solid var(--border)", color: "var(--text)" }}>Join room</button>
+                <input id="room-code-input" value={roomCodeInput} onChange={event => setRoomCodeInput(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8))} placeholder="Room code" maxLength={8} className="w-28 rounded-full px-3 py-2 text-xs uppercase" style={{ background: "var(--surface-2)", border: "1px solid var(--border)", color: "var(--text)" }} />
+                <button type="submit" disabled={![6, 8].includes(roomCodeInput.length) || firebaseStatus !== "Connected"} className="btn-pill px-3 py-2 text-xs disabled:opacity-40" style={{ background: "var(--surface-2)", border: "1px solid var(--border)", color: "var(--text)" }}>Join room</button>
               </form>
               <button type="button" onClick={onCreateRoom} disabled={firebaseStatus !== "Connected"} className="btn-pill px-3 py-2 text-xs disabled:opacity-40" style={{ background: "var(--primary)", color: "#0B0D0F" }}>Create room</button>
               <span className="text-[10px]" style={{ color: firebaseStatus === "Connected" ? "var(--text-muted)" : "var(--warning)" }}>{firebaseStatus}</span>
