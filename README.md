@@ -10,7 +10,7 @@ The entire application — UI, game logic, and real-time multiplayer sync — li
 
 ## Features
 
-- **Live online rooms** — create a room and share a 6-character code, or join someone else's room
+- **Live online rooms** — new rooms use an 8-character cryptographically random invite code; existing 6-character room codes remain joinable
 - **Real-time bidding auction** — humans and CPU-controlled managers bid on a rotating pool of players until each squad is full
 - **Budget & squad management** — every manager starts with a fixed budget (₹100 Cr) and must fill an 11-player squad without overspending
 - **Skip votes & auction timers** — managers can vote to skip a stuck auction or vote on a bidding timer
@@ -27,9 +27,9 @@ The entire application — UI, game logic, and real-time multiplayer sync — li
 ## Tech Stack
 
 ### Frontend
-- **[React 18](https://react.dev/)** — loaded via CDN (`react` + `react-dom`, production UMD builds), no build step
-- **[Babel Standalone](https://babeljs.io/docs/babel-standalone)** — compiles JSX directly in the browser at runtime (`<script type="text/babel">`)
-- **[Tailwind CSS](https://tailwindcss.com/)** — loaded via the Tailwind CDN script for utility classes
+- **[React 18](https://react.dev/)** — loaded via CDN (`react` + `react-dom`, production UMD builds) with subresource integrity checks
+- **[Babel Standalone](https://babeljs.io/docs/babel-standalone)** — compiles JSX directly in the browser at runtime (`<script type="text/babel">`), with a subresource integrity check
+- **[Tailwind CSS](https://tailwindcss.com/)** — utility classes are compiled into the local `tailwind.css` file; the page no longer runs Tailwind from a third-party script CDN
 - **Custom CSS** — a small hand-written stylesheet for theme variables, fonts, and finer visual details (`Inter` and `Teko` from Google Fonts)
 - **Plain JavaScript / JSX** — all game logic (auction rules, CPU bidding AI, fixture generation, match simulation, standings calculation, etc.) is hand-written, with no external state-management library
 
@@ -43,10 +43,11 @@ No custom server exists — [Firebase](https://firebase.google.com/) is used ent
     meta/        → room code, host UID, creation time
     members/     → who's connected, online status, presence
     state/       → the full game state (managers, budgets, squads, pool, current auction, fixtures, league data, logs, etc.)
-    commands/    → an inbox of actions from non-host clients, processed by the host
+    commands/    → one validated pending action per member, processed by the host
 
-  roomCodes/{code}/  → maps a human-readable 6-character code to a roomId
+  roomCodes/{code}/  → maps a human-readable invite code to a roomId
   ```
+- **Firebase Security Rules** — `database.rules.json` is the reviewed rules source for member-only room reads, invite-code-verified membership, host-only state writes, and validated one-slot commands. These rules must be published in Firebase Console separately from the static site.
 
 ### Multiplayer Architecture (Host-Authoritative Model)
 XOLO uses a **host-authoritative** sync pattern instead of a traditional server:
@@ -54,7 +55,7 @@ XOLO uses a **host-authoritative** sync pattern instead of a traditional server:
 1. Whoever creates the room becomes the **host**. All game logic (bidding validation, CPU AI, match simulation, etc.) runs *only* on the host's device.
 2. The host continuously writes the full game state to `rooms/{roomId}/state` in Firebase whenever it changes.
 3. Every other player (a "guest") only **listens** to `rooms/{roomId}/state` in real time via Firebase's `onValue` and re-renders their UI to match — they never compute game logic themselves.
-4. When a guest wants to do something (place a bid, vote to skip, join as a manager), they don't modify the state directly. Instead, they write a small **command** to `rooms/{roomId}/commands`. The host listens for new commands, validates and applies them, updates its own local state (which then syncs back out to everyone), and deletes the processed command.
+4. When a guest wants to do something (place a bid, vote to skip, join as a manager), they don't modify the state directly. Instead, they write one small **command** to `rooms/{roomId}/commands/{memberUid}`. The host listens for new commands, validates and applies them, updates its own local state (which then syncs back out to everyone), and deletes the processed command so that member can send the next action.
 5. **Presence** is handled with Firebase's `onDisconnect()`, so if a manager's tab closes or their connection drops, the room updates automatically.
 
 This keeps the game consistent across every device without needing a dedicated game server — Firebase Realtime Database's low-latency sync is what makes it feel instant.
@@ -67,10 +68,13 @@ An **error boundary** wraps the whole React tree so that any unexpected renderin
 ## Project Structure
 
 ```
-index.html   → the entire application (markup, styles, Firebase setup, and all React/JSX game logic)
+index.html          → markup, Firebase setup, and all React/JSX game logic
+tailwind.css        → locally compiled Tailwind utilities; served from the same origin
+database.rules.json → Firebase Realtime Database rules; publish separately in Firebase Console
+firebase.json       → points Firebase CLI to the rules file
 ```
 
-Everything is intentionally kept in one file so it can be hosted anywhere that serves static files — no build tools, bundlers, or `node_modules` required to run it.
+The app has no runtime build step: host the files together on any static server. The CSS source is already compiled, so build tools and `node_modules` are not required to run it.
 
 ---
 
@@ -89,6 +93,8 @@ Everything is intentionally kept in one file so it can be hosted anywhere that s
 The live version is hosted for free on **GitHub Pages**, served directly from `index.html` at the repo root. Any static host (Netlify, Vercel, Firebase Hosting itself, etc.) would work identically since there's no server-side code.
 
 Whichever domain the app is hosted on must be added to **Firebase Console → Authentication → Settings → Authorized domains**, or anonymous sign-in will fail.
+
+Before deploying the game changes, publish the matching `database.rules.json` in **Firebase Console → Realtime Database → Rules** (or run `firebase deploy --only database --project projectfootball-bfe26` after authenticating Firebase CLI). The Firebase web `apiKey` in `index.html` is a public client identifier, not a private credential; restrict it to the game's domains and required Google APIs in Google Cloud Console, and enable Firebase App Check to reduce scripted abuse.
 
 ---
 
@@ -113,6 +119,6 @@ Whichever domain the app is hosted on must be added to **Firebase Console → Au
 
 ## Known Limitations
 
-- Firebase Security Rules should be reviewed before wider public use — as a client-only app, the database rules are the only thing preventing unauthorized reads/writes to rooms.
+- Anonymous sign-in remains public by design. The database rules restrict room access and command abuse, but Firebase App Check and Google API-key referrer/API restrictions should also be enabled to reduce automated abuse.
 - Because the host's device runs all game logic, if the host disconnects mid-game, the room currently has no automatic host handover.
-- The Tailwind CDN script (`cdn.tailwindcss.com`) is fine for a small project like this but is not recommended by Tailwind for production apps at larger scale — a proper build step would be a natural next improvement.
+- The host browser remains the authoritative game engine; a compromised host browser can still submit whatever state its own rules permit.
