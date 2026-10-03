@@ -29,7 +29,7 @@ The entire application — UI, game logic, and real-time multiplayer sync — li
 ### Frontend
 - **[React 18](https://react.dev/)** — loaded via CDN (`react` + `react-dom`, production UMD builds) with subresource integrity checks
 - **[Babel Standalone](https://babeljs.io/docs/babel-standalone)** — compiles JSX directly in the browser at runtime (`<script type="text/babel">`), with a subresource integrity check
-- **[Tailwind CSS](https://tailwindcss.com/)** — utility classes are compiled into the local `tailwind.css` file; the page no longer runs Tailwind from a third-party script CDN
+- **[Tailwind CSS](https://tailwindcss.com/)** — loaded from the original Tailwind browser CDN so the existing UI styling and layout remain unchanged
 - **Custom CSS** — a small hand-written stylesheet for theme variables, fonts, and finer visual details (`Inter` and `Teko` from Google Fonts)
 - **Plain JavaScript / JSX** — all game logic (auction rules, CPU bidding AI, fixture generation, match simulation, standings calculation, etc.) is hand-written, with no external state-management library
 
@@ -68,13 +68,13 @@ An **error boundary** wraps the whole React tree so that any unexpected renderin
 ## Project Structure
 
 ```
-index.html          → markup, Firebase setup, and all React/JSX game logic
-tailwind.css        → locally compiled Tailwind utilities; served from the same origin
+index.html          → the full app: markup, styles, Firebase setup, and React/JSX game logic
 database.rules.json → Firebase Realtime Database rules; publish separately in Firebase Console
 firebase.json       → points Firebase CLI to the rules file
+SECURITY_AUDIT.md   → review findings, validation, and remaining console actions
 ```
 
-The app has no runtime build step: host the files together on any static server. The CSS source is already compiled, so build tools and `node_modules` are not required to run it.
+The app has no runtime build step: host `index.html` on any static server. Build tools and `node_modules` are not required to run it.
 
 ---
 
@@ -120,5 +120,6 @@ Before deploying the game changes, publish the matching `database.rules.json` in
 ## Known Limitations
 
 - Anonymous sign-in remains public by design. The database rules restrict room access and command abuse, but Firebase App Check and Google API-key referrer/API restrictions should also be enabled to reduce automated abuse.
+- Tailwind's original browser CDN is retained to preserve the design exactly; it remains an executable third-party dependency without Subresource Integrity. Replacing it safely would require matching the original runtime styling before switching to a local build.
 - Because the host's device runs all game logic, if the host disconnects mid-game, the room currently has no automatic host handover.
 - The host browser remains the authoritative game engine; a compromised host browser can still submit whatever state its own rules permit.
