@@ -1361,7 +1361,7 @@ function App() {
       if (!mapping?.roomId || !mapping?.hostUid) { setRoomMessage("Room not found. Check the code and try again."); return; }
       if (mapping.ready !== true) { setRoomMessage("That room is still starting. Wait a moment and try again."); return; }
       const uid = firebaseUser.uid;
-      const member = { uid, name: "", online: true, joinedAt: Date.now() };
+      const member = { uid, name: "", online: true, joinedAt: Date.now(), roomCode: code };
       const memberRef = firebaseServices.ref(db, `rooms/${mapping.roomId}/members/${uid}`);
       await firebaseServices.set(memberRef, member);
       const savedSnapshot = await firebaseServices.get(firebaseServices.ref(db, `rooms/${mapping.roomId}/state`));
