@@ -139,6 +139,9 @@
   .card-soft:hover {
     border-color: var(--border-hover);
   }
+  @keyframes xolo-auction-wheel-spin {
+    to { transform: rotate(360deg); }
+  }
   @media (prefers-reduced-motion: reduce) {
     * { animation: none !important; transition: none !important; }
   }
@@ -432,6 +435,7 @@ const BID_STEP = 1;
 const INITIAL_DEFAULT_BASE = 1;
 const AUCTION_TIMER_OPTIONS = [10, 15, 30, 60];
 const AUCTION_BOT_TRANSITION_MS = 700;
+const AUCTION_PLAYER_SPIN_MS = 3200;
 
 function crFmt(n) {
   return `₹${n.toLocaleString("en-IN")} Cr`;
@@ -501,7 +505,7 @@ function cpuMaxBid(player, base, budget, squad, remainingPool) {
 function cpuAuctionOne(player, base, managers, budgets, squads, remainingPool) {
   const caps = {};
   managers.forEach(m => {
-    caps[m.id] = cpuMaxBid(player, base, budgets[m.id], squads[m.id] || [], remainingPool);
+    caps[m.id] = cpuMaxBid(player, base, budgets[m.id], squads[m.id], remainingPool);
   });
   let interested = managers.filter(m =>
     caps[m.id] >= base && budgets[m.id] >= base && (squads[m.id] || []).length < SQUAD_SIZE
@@ -1171,6 +1175,7 @@ function App() {
   const [pool, setPool] = useState(PLAYER_POOL);
   const [defaultBasePrice, setDefaultBasePriceState] = useState(INITIAL_DEFAULT_BASE);
   const [current, setCurrent] = useState(null);
+  const [playerSpin, setPlayerSpin] = useState(null);
   const [skipVotes, setSkipVotes] = useState([]);
   const [auctionTimerVotes, setAuctionTimerVotes] = useState({});
   const [auctionDuration, setAuctionDuration] = useState(null);
@@ -1238,7 +1243,7 @@ function App() {
 
   function buildSharedState() {
     return JSON.parse(JSON.stringify({
-      version: 1, managers, budgets, squads, pool, current, skipVotes, auctionTimerVotes,
+      version: 1, managers, budgets, squads, pool, current, playerSpin, skipVotes, auctionTimerVotes,
       auctionDuration, auctionDeadlineAt, bidHistory, log, phase, fixtures,
       lastSimulatedKeys, leagueTeams, liveMatch, botPaused, defaultBasePrice
     }));
@@ -1246,45 +1251,25 @@ function App() {
 
   function applySharedState(state) {
     if (!state) return;
-    const nextManagers = Array.isArray(state.managers) ? state.managers : Object.values(state.managers || {});
-    const nextBudgets = { ...(state.budgets || {}) };
-    const nextSquads = { ...(state.squads || {}) };
-    // Older or partially-written snapshots can briefly contain a manager before
-    // its budget/squad child. Fill safe defaults before publishing the manager list.
-    nextManagers.forEach(manager => {
-      if (!Object.prototype.hasOwnProperty.call(nextBudgets, manager.id)) nextBudgets[manager.id] = START_BUDGET;
-      if (!Array.isArray(nextSquads[manager.id])) nextSquads[manager.id] = [];
-    });
-
-    ReactDOM.unstable_batchedUpdates(() => {
-      setBudgets(nextBudgets);
-      setSquads(nextSquads);
-      setPool(Array.isArray(state.pool) ? state.pool : Object.values(state.pool || {}));
-      setCurrent(state.current || null);
-      setSkipVotes(Array.isArray(state.skipVotes) ? state.skipVotes : Object.values(state.skipVotes || {}));
-      setAuctionTimerVotes(state.auctionTimerVotes || {});
-      setAuctionDuration(state.auctionDuration ?? null);
-      setAuctionDeadlineAt(state.auctionDeadlineAt ?? null);
-      setBidHistory(Array.isArray(state.bidHistory) ? state.bidHistory : Object.values(state.bidHistory || {}));
-      setLog(Array.isArray(state.log) ? state.log : Object.values(state.log || {}));
-      setPhase(state.phase || "auction");
-      setFixtures(Array.isArray(state.fixtures) ? state.fixtures : Object.values(state.fixtures || {}));
-      setLastSimulatedKeys(Array.isArray(state.lastSimulatedKeys) ? state.lastSimulatedKeys : Object.values(state.lastSimulatedKeys || {}));
-      setLeagueTeams(Array.isArray(state.leagueTeams) ? state.leagueTeams : Object.values(state.leagueTeams || {}));
-      const liveMatch = state.liveMatch
-        ? {
-          ...state.liveMatch,
-          events: Array.isArray(state.liveMatch.events)
-            ? state.liveMatch.events
-            : Object.values(state.liveMatch.events || {}),
-        }
-        : null;
-      setLiveMatch(liveMatch);
-      setBotPaused(!!state.botPaused);
-      setDefaultBasePriceState(state.defaultBasePrice ?? INITIAL_DEFAULT_BASE);
-      // Publish managers last as a defensive fallback for non-batched renderers.
-      setManagers(nextManagers);
-    });
+    setManagers(state.managers || []);
+    setBudgets(state.budgets || {});
+    setSquads(state.squads || {});
+    setPool(Array.isArray(state.pool) ? state.pool : Object.values(state.pool || {}));
+    setCurrent(state.current || null);
+    setPlayerSpin(state.playerSpin && typeof state.playerSpin === "object" ? state.playerSpin : null);
+    setSkipVotes(state.skipVotes || []);
+    setAuctionTimerVotes(state.auctionTimerVotes || {});
+    setAuctionDuration(state.auctionDuration ?? null);
+    setAuctionDeadlineAt(state.auctionDeadlineAt ?? null);
+    setBidHistory(state.bidHistory || []);
+    setLog(state.log || []);
+    setPhase(state.phase || "auction");
+    setFixtures(state.fixtures || []);
+    setLastSimulatedKeys(state.lastSimulatedKeys || []);
+    setLeagueTeams(state.leagueTeams || []);
+    setLiveMatch(state.liveMatch || null);
+    setBotPaused(!!state.botPaused);
+    setDefaultBasePriceState(state.defaultBasePrice ?? INITIAL_DEFAULT_BASE);
   }
 
   function randomRoomCode() {
@@ -1437,11 +1422,9 @@ function App() {
     const color = MANAGER_COLORS[managers.length % MANAGER_COLORS.length];
     const club = pickNextClub(managers);
     const formation = getFormation(formationName).name;
-    ReactDOM.unstable_batchedUpdates(() => {
-      setBudgets(b => ({ ...b, [id]: START_BUDGET }));
-      setSquads(s => ({ ...s, [id]: [] }));
-      setManagers(list => [...list, { id, name, color, club, formation }]);
-    });
+    setManagers(list => [...list, { id, name, color, club, formation }]);
+    setBudgets(b => ({ ...b, [id]: START_BUDGET }));
+    setSquads(s => ({ ...s, [id]: [] }));
     addLog(`${name} joined the auction.`);
     return id;
   }
@@ -1587,25 +1570,51 @@ function App() {
   }
 
   function startNextBotAuction() {
-    if (phase !== "auction" || managers.length === 0 || pool.length === 0 || current) return;
+    if (phase !== "auction" || managers.length === 0 || pool.length === 0 || current || playerSpin) return;
 
-    const player = pool[0];
+    const selectedIndex = Math.floor(Math.random() * pool.length);
+    const player = pool[selectedIndex];
+    const startIndex = Math.floor(Math.random() * pool.length);
+    const targetOffset = (selectedIndex - startIndex + pool.length) % pool.length;
+    const startedAt = Date.now();
+    setPlayerSpin({
+      playerId: player.id,
+      startedAt,
+      duration: AUCTION_PLAYER_SPIN_MS,
+      startIndex,
+      stepsTotal: pool.length * 3 + targetOffset,
+      base: defaultBasePrice,
+    });
     setSkipVotes([]);
     setAuctionTimerVotes({});
     setAuctionDuration(null);
     setAuctionSecondsLeft(null);
     auctionTimerDeadlineRef.current = null;
-    const openingPrice = defaultBasePrice;
-    setCurrent({ player, base: openingPrice, bid: openingPrice, bidder: null, status: "live" });
     setBidHistory([]);
-    addLog(`XOLO Auctioneer Bot opens ${player.name} at ${crFmt(openingPrice)}.`);
+    addLog("XOLO Auctioneer Bot spins the wheel for the next player.");
   }
 
   useEffect(() => {
     if (roomId && !isRoomHost) return;
-    if (!inGame || phase !== "auction" || botPaused || managers.length === 0 || current || pool.length === 0) return;
+    if (!inGame || phase !== "auction" || botPaused || managers.length === 0 || current || playerSpin || pool.length === 0) return;
     startNextBotAuction();
-  }, [inGame, roomId, isRoomHost, phase, botPaused, managers.length, current, pool.length]);
+  }, [inGame, roomId, isRoomHost, phase, botPaused, managers.length, current, playerSpin, pool.length]);
+
+  useEffect(() => {
+    if ((roomId && !isRoomHost) || !playerSpin || !inGame || phase !== "auction" || botPaused || current) return;
+    const duration = Math.max(1, Number(playerSpin.duration) || AUCTION_PLAYER_SPIN_MS);
+    const remaining = Math.max(0, Number(playerSpin.startedAt) + duration - Date.now());
+    const timeout = setTimeout(() => {
+      const player = pool.find(candidate => String(candidate.id) === String(playerSpin.playerId));
+      setPlayerSpin(null);
+      if (!player) return;
+      const openingPrice = Number(playerSpin.base) > 0 ? Number(playerSpin.base) : defaultBasePrice;
+      setCurrent({ player, base: openingPrice, bid: openingPrice, bidder: null, status: "live" });
+      setBidHistory([]);
+      addLog(`XOLO Auctioneer Bot opens ${player.name} at ${crFmt(openingPrice)}.`);
+    }, remaining);
+    return () => clearTimeout(timeout);
+  }, [roomId, isRoomHost, playerSpin, inGame, phase, botPaused, current, pool, defaultBasePrice]);
 
   useEffect(() => {
     const isRoomController = !roomId || isRoomHost;
@@ -1668,13 +1677,11 @@ function App() {
       addLog(`Bid rejected — ${Number.isFinite(bidAmount) ? crFmt(bidAmount) : "that amount"} is not higher than the current bid of ${crFmt(current.bid)}.`);
       return;
     }
-    const managerBudget = Number(budgets?.[managerId] || 0);
-    const managerSquad = Array.isArray(squads?.[managerId]) ? squads[managerId] : [];
-    if (managerBudget < bidAmount) {
+    if (budgets[managerId] < bidAmount) {
       addLog(`${label(managerId)} tried to bid but doesn't have enough budget.`);
       return;
     }
-    if (managerSquad.length >= SQUAD_SIZE) {
+    if (squads[managerId].length >= SQUAD_SIZE) {
       addLog(`${label(managerId)} squad is already full.`);
       return;
     }
@@ -1782,6 +1789,7 @@ function App() {
       return;
     }
 
+    setPlayerSpin(null);
     setBotPaused(true);
     let simManagers = managers;
     let simBudgets = budgets;
@@ -1831,6 +1839,7 @@ function App() {
   }
 
   function startLeague() {
+    setPlayerSpin(null);
     const teams = buildLeagueTeams(managers, squads);
     setLeagueTeams(teams);
     setFixtures(generateFixtures(teams.map(t => t.id)));
@@ -1999,7 +2008,7 @@ function App() {
     const state = buildSharedState();
     firebaseServices.set(firebaseServices.ref(firebaseServices.db, `rooms/${roomId}/state`), state)
       .catch(error => setRoomMessage(error?.message || "Could not sync the game state."));
-  }, [roomId, isRoomHost, firebaseServices, managers, budgets, squads, pool, current, skipVotes, auctionTimerVotes, auctionDuration, auctionDeadlineAt, bidHistory, log, phase, fixtures, lastSimulatedKeys, leagueTeams, liveMatch, botPaused, defaultBasePrice]);
+  }, [roomId, isRoomHost, firebaseServices, managers, budgets, squads, pool, current, playerSpin, skipVotes, auctionTimerVotes, auctionDuration, auctionDeadlineAt, bidHistory, log, phase, fixtures, lastSimulatedKeys, leagueTeams, liveMatch, botPaused, defaultBasePrice]);
 
   const humanManagers = managers.filter(manager => !manager.bot);
   roomActionsRef.current = {
@@ -2035,6 +2044,8 @@ function App() {
         <LeftPanel budgets={budgets} squads={squads} managers={managers} removeManager={requestRemoveManagerFromUI} canRemoveManagers={!roomId || isRoomHost} />
         <CenterStage
           current={current}
+          playerSpin={playerSpin}
+          pool={pool}
           bidHistory={bidHistory}
           budgets={budgets}
           viewAs={viewAs}
@@ -2215,9 +2226,7 @@ function LeftPanel({ budgets, squads, managers, removeManager, canRemoveManagers
       {managers.length === 0 && (
         <p className="text-xs" style={{ color: "var(--text-muted)" }}>No managers yet — enter a name up top to join.</p>
       )}
-      {managers.map(m => {
-        const managerSquad = Array.isArray(squads?.[m.id]) ? squads[m.id] : [];
-        return (
+      {managers.map(m => (
         <div key={m.id} className="card-soft p-3.5 space-y-2.5" style={{ background: "var(--surface-2)" }}>
           <div className="flex items-center justify-between">
             <span>
@@ -2227,10 +2236,10 @@ function LeftPanel({ budgets, squads, managers, removeManager, canRemoveManagers
             <span className="display text-2xl font-bold" style={{ color: "var(--text)" }}>{crFmt(budgets[m.id])}</span>
           </div>
           <div className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
-            Squad {managerSquad.length} / {SQUAD_SIZE}
+            Squad {squads[m.id].length} / {SQUAD_SIZE}
           </div>
           <div className="flex flex-wrap gap-1.5">
-            {managerSquad.map(p => (
+            {squads[m.id].map(p => (
               <span
                 key={p.id}
                 className="inline-flex items-center gap-1.5 text-[11px] font-medium pl-1 pr-2.5 py-0.5 rounded-full"
@@ -2240,11 +2249,11 @@ function LeftPanel({ budgets, squads, managers, removeManager, canRemoveManagers
                 {p.name.split(" ").slice(-1)[0]}
               </span>
             ))}
-            {managerSquad.length === 0 && (
+            {squads[m.id].length === 0 && (
               <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>No players yet</span>
             )}
           </div>
-          {canRemoveManagers && managerSquad.length === 0 && (
+          {canRemoveManagers && squads[m.id].length === 0 && (
             <button
               onClick={() => removeManager(m.id)}
               aria-label={`Remove ${m.name} from the auction`}
@@ -2255,14 +2264,58 @@ function LeftPanel({ budgets, squads, managers, removeManager, canRemoveManagers
             </button>
           )}
         </div>
-        );
-      })}
+      ))}
+    </div>
+  );
+}
+
+// ---------- Auctioneer player wheel ----------
+function AuctionPlayerWheel({ pool, spin }) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 60);
+    return () => clearInterval(timer);
+  }, [spin?.startedAt]);
+
+  if (!spin || !Array.isArray(pool) || pool.length === 0) return null;
+
+  const duration = Math.max(1, Number(spin.duration) || AUCTION_PLAYER_SPIN_MS);
+  const progress = Math.min(1, Math.max(0, (now - Number(spin.startedAt || now)) / duration));
+  const easedProgress = 1 - Math.pow(1 - progress, 3);
+  const startIndex = ((Math.floor(Number(spin.startIndex) || 0) % pool.length) + pool.length) % pool.length;
+  const totalSteps = Math.max(1, Math.floor(Number(spin.stepsTotal) || pool.length * 3));
+  const targetIndex = pool.findIndex(player => String(player.id) === String(spin.playerId));
+  let displayIndex = (startIndex + Math.floor(easedProgress * totalSteps)) % pool.length;
+  if (progress >= 1 && targetIndex >= 0) displayIndex = targetIndex;
+  const displayedPlayer = pool[displayIndex];
+
+  return (
+    <div className="flex flex-col items-center justify-center gap-3 py-3" role="status" aria-label="Auctioneer is spinning for the next player">
+      <div className="relative h-40 w-40" aria-hidden="true">
+        <div
+          className="absolute inset-1 rounded-full border-4"
+          style={{
+            background: "repeating-conic-gradient(var(--primary) 0deg 15deg, var(--surface-3) 15deg 30deg)",
+            borderColor: "var(--border-hover)",
+            animation: "xolo-auction-wheel-spin 700ms linear infinite",
+            boxShadow: "0 0 28px rgba(24,201,100,.2)",
+          }}
+        />
+        <span className="absolute inset-7 flex items-center justify-center rounded-full text-4xl" style={{ background: "var(--surface)", border: "3px solid var(--border)", color: "var(--primary)" }}>⚽</span>
+        <span className="absolute -top-1 left-1/2 z-10 -translate-x-1/2 text-2xl" style={{ color: "var(--primary)" }}>▼</span>
+      </div>
+      <div className="text-xs font-bold uppercase tracking-widest" style={{ color: "var(--primary)" }}>Auctioneer spinning</div>
+      <div className="display min-h-[3rem] text-4xl font-bold" style={{ color: "var(--text)" }} aria-live="off">
+        {displayedPlayer?.name || "Selecting player…"}
+      </div>
+      <div className="text-xs font-medium" style={{ color: "var(--text-muted)" }}>Choosing from {pool.length} available players</div>
     </div>
   );
 }
 
 // ---------- Center stage: the live auction card ----------
-function CenterStage({ current, bidHistory, budgets, viewAs, placeBid, managers, humanManagers, skipVotes, voteToSkip, auctionTimerVotes, auctionDuration, auctionSecondsLeft, voteAuctionTimer }) {
+function CenterStage({ current, playerSpin, pool, bidHistory, budgets, viewAs, placeBid, managers, humanManagers, skipVotes, voteToSkip, auctionTimerVotes, auctionDuration, auctionSecondsLeft, voteAuctionTimer }) {
   const isManager = !!viewAs && humanManagers.some(manager => manager.id === viewAs);
   const votedToSkip = skipVotes.includes(viewAs);
   const skipVoteCount = skipVotes.filter(id => humanManagers.some(manager => manager.id === id)).length;
@@ -2270,10 +2323,12 @@ function CenterStage({ current, bidHistory, budgets, viewAs, placeBid, managers,
   return (
     <div className="card-soft p-8 flex flex-col items-center justify-center text-center min-h-[520px] relative">
       {!current && (
-        <div style={{ color: "var(--text-muted)" }}>
-          <p className="display text-4xl font-bold mb-2" style={{ color: "var(--text)" }}>No player under auction</p>
-          <p className="text-sm font-medium">Waiting for the Auctioneer Bot to start the next player.</p>
-        </div>
+        playerSpin ? <AuctionPlayerWheel pool={pool} spin={playerSpin} /> : (
+          <div style={{ color: "var(--text-muted)" }}>
+            <p className="display text-4xl font-bold mb-2" style={{ color: "var(--text)" }}>No player under auction</p>
+            <p className="text-sm font-medium">Waiting for the Auctioneer Bot to start the next player.</p>
+          </div>
+        )
       )}
 
       {current && (
@@ -2615,9 +2670,8 @@ function AwardCard({ title, icon, winner, detail }) {
 
 function LiveMatchTicker({ liveMatch }) {
   if (!liveMatch) return null;
-  const events = Array.isArray(liveMatch.events) ? liveMatch.events : [];
-  const runningHome = events.filter(e => e.side === "home").length;
-  const runningAway = events.filter(e => e.side === "away").length;
+  const runningHome = liveMatch.events.filter(e => e.side === "home").length;
+  const runningAway = liveMatch.events.filter(e => e.side === "away").length;
   return (
     <div
       className="card-soft p-5 space-y-3"
@@ -2639,13 +2693,13 @@ function LiveMatchTicker({ liveMatch }) {
         <span className="font-bold text-lg flex-1" style={{ color: liveMatch.awayColor }}>{liveMatch.awayName}</span>
       </div>
       <ul className="space-y-1.5 text-sm font-medium max-h-40 overflow-y-auto">
-        {events.length === 0 && !liveMatch.finished && (
+        {liveMatch.events.length === 0 && !liveMatch.finished && (
           <li className="text-center py-2" style={{ color: "var(--text-muted)" }}>Kick-off…</li>
         )}
-        {events.map((ev, i) => (
+        {liveMatch.events.map((ev, i) => (
           <li key={i} className="flex justify-between gap-2">
             <span style={{ color: "var(--text-muted)" }}>{formatMinute(ev.minute)}</span>
-            <span>⚽ {ev.scorer?.name || "Unknown player"} <span style={{ color: "var(--text-muted)" }}>({ev.side === "home" ? liveMatch.homeName : liveMatch.awayName})</span></span>
+            <span>⚽ {ev.scorer.name} <span style={{ color: "var(--text-muted)" }}>({ev.side === "home" ? liveMatch.homeName : liveMatch.awayName})</span></span>
           </li>
         ))}
       </ul>
